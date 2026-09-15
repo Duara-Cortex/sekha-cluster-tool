@@ -37,6 +37,7 @@ type FlagOverrides struct {
 	SensoryURL        string
 	WorkingURL        string
 	KnowledgeURL      string
+	OrchestrationURL  string
 	Timeout           time.Duration
 	DeliberateTimeout time.Duration
 	SalienceThreshold float64
@@ -142,6 +143,9 @@ func Load(flags FlagOverrides) (*Config, error) {
 	}
 	if flags.KnowledgeURL != "" {
 		cfg.KnowledgeURL = flags.KnowledgeURL
+	}
+	if flags.OrchestrationURL != "" && cfg.WorkingURL == "" {
+		cfg.WorkingURL = flags.OrchestrationURL
 	}
 	if flags.Timeout > 0 {
 		cfg.DefaultTimeout = flags.Timeout

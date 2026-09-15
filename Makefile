@@ -3,17 +3,27 @@ PKG=github.com/Duara-Cortex/sekha-cluster-tool/cmd/sekha-cluster-tool
 VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null || echo "v1.0.0-dev")
 BUILD_TIME=$(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 
+ENV_FILE?=.env
+ifneq (,$(wildcard $(ENV_FILE)))
+    -include $(ENV_FILE)
+endif
+
 # Cluster layer addresses configured by the machine building it.
-# Default to empty strings (blank) unless explicitly provided by the builder.
-SENSORY_URL?=
-WORKING_URL?=
-KNOWLEDGE_URL?=
+# Defaults are dynamically loaded from $(ENV_FILE) if present, or blank if unconfigured.
+SENSORY_URL?=$(CLUSTER_SENSORY_URL)
+WORKING_URL?=$(CLUSTER_WORKING_URL)
+KNOWLEDGE_URL?=$(CLUSTER_KNOWLEDGE_URL)
+
+# Dynamic resolution from $(ENV_FILE) if created or updated during the build recipe
+SENSORY_URL_RESOLVED=$(if $(SENSORY_URL),$(SENSORY_URL),$(shell [ -f "$(ENV_FILE)" ] && grep -E '^CLUSTER_SENSORY_URL=' "$(ENV_FILE)" | head -n 1 | cut -d= -f2- | tr -d '\r"' | tr -d "'"))
+WORKING_URL_RESOLVED=$(if $(WORKING_URL),$(WORKING_URL),$(shell [ -f "$(ENV_FILE)" ] && grep -E '^CLUSTER_WORKING_URL=' "$(ENV_FILE)" | head -n 1 | cut -d= -f2- | tr -d '\r"' | tr -d "'"))
+KNOWLEDGE_URL_RESOLVED=$(if $(KNOWLEDGE_URL),$(KNOWLEDGE_URL),$(shell [ -f "$(ENV_FILE)" ] && grep -E '^CLUSTER_KNOWLEDGE_URL=' "$(ENV_FILE)" | head -n 1 | cut -d= -f2- | tr -d '\r"' | tr -d "'"))
 
 CONFIG_PKG=github.com/Duara-Cortex/sekha-cluster-tool/internal/config
 LDFLAGS=-s -w -X 'main.Version=$(VERSION)' \
-        -X '$(CONFIG_PKG).BuildSensoryURL=$(SENSORY_URL)' \
-        -X '$(CONFIG_PKG).BuildWorkingURL=$(WORKING_URL)' \
-        -X '$(CONFIG_PKG).BuildKnowledgeURL=$(KNOWLEDGE_URL)'
+        -X '$(CONFIG_PKG).BuildSensoryURL=$(SENSORY_URL_RESOLVED)' \
+        -X '$(CONFIG_PKG).BuildWorkingURL=$(WORKING_URL_RESOLVED)' \
+        -X '$(CONFIG_PKG).BuildKnowledgeURL=$(KNOWLEDGE_URL_RESOLVED)'
 
 INSTALL_DIR?=$(HOME)/.local/bin
 
