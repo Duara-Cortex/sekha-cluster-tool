@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,30 +23,241 @@ var (
 	Version = "v1.0.0-dev"
 )
 
+// GlobalFlags captures CLI arguments specified globally across any subcommand position.
+type GlobalFlags struct {
+	EnvPath          string
+	SensoryURL       string
+	WorkingURL       string
+	KnowledgeURL     string
+	OrchestrationURL string
+	TraceID          string
+	Verbose          bool
+	Timeout          time.Duration
+}
+
+func matchStringFlag(arg string, names ...string) (bool, string, bool) {
+	for _, name := range names {
+		prefix1 := "-" + name
+		prefix2 := "--" + name
+
+		if arg == prefix1 || arg == prefix2 {
+			return true, "", false
+		}
+		if strings.HasPrefix(arg, prefix1+"=") {
+			return true, strings.TrimPrefix(arg, prefix1+"="), true
+		}
+		if strings.HasPrefix(arg, prefix2+"=") {
+			return true, strings.TrimPrefix(arg, prefix2+"="), true
+		}
+	}
+	return false, "", false
+}
+
+func matchBoolFlag(arg string, names ...string) (bool, bool, bool) {
+	for _, name := range names {
+		prefix1 := "-" + name
+		prefix2 := "--" + name
+
+		if arg == prefix1 || arg == prefix2 {
+			return true, true, false
+		}
+		if strings.HasPrefix(arg, prefix1+"=") {
+			v, err := strconv.ParseBool(strings.TrimPrefix(arg, prefix1+"="))
+			if err == nil {
+				return true, v, true
+			}
+			return true, true, true
+		}
+		if strings.HasPrefix(arg, prefix2+"=") {
+			v, err := strconv.ParseBool(strings.TrimPrefix(arg, prefix2+"="))
+			if err == nil {
+				return true, v, true
+			}
+			return true, true, true
+		}
+	}
+	return false, false, false
+}
+
+func parseArgs(rawArgs []string) (GlobalFlags, string, []string) {
+	var global GlobalFlags
+	var subcommand string
+	var subcommandArgs []string
+
+	i := 0
+	for i < len(rawArgs) {
+		arg := rawArgs[i]
+
+		if arg == "--" {
+			i++
+			if subcommand == "" && i < len(rawArgs) {
+				subcommand = rawArgs[i]
+				i++
+			}
+			for i < len(rawArgs) {
+				subcommandArgs = append(subcommandArgs, rawArgs[i])
+				i++
+			}
+			break
+		}
+
+		if (arg == "-h" || arg == "--help" || arg == "-help") && subcommand == "" {
+			subcommand = "help"
+			i++
+			continue
+		}
+
+		if (arg == "-v" || arg == "--version" || arg == "-version") && subcommand == "" {
+			subcommand = "version"
+			i++
+			continue
+		}
+
+		if m, val, _ := matchBoolFlag(arg, "verbose"); m {
+			global.Verbose = val
+			i++
+			continue
+		}
+
+		if m, val, inline := matchStringFlag(arg, "sensory-url", "node3-url"); m {
+			if inline {
+				global.SensoryURL = val
+				i++
+			} else if i+1 < len(rawArgs) {
+				global.SensoryURL = rawArgs[i+1]
+				i += 2
+			} else {
+				i++
+			}
+			continue
+		}
+
+		if m, val, inline := matchStringFlag(arg, "working-url", "node2-url"); m {
+			if inline {
+				global.WorkingURL = val
+				i++
+			} else if i+1 < len(rawArgs) {
+				global.WorkingURL = rawArgs[i+1]
+				i += 2
+			} else {
+				i++
+			}
+			continue
+		}
+
+		if m, val, inline := matchStringFlag(arg, "knowledge-url", "node1-url"); m {
+			if inline {
+				global.KnowledgeURL = val
+				i++
+			} else if i+1 < len(rawArgs) {
+				global.KnowledgeURL = rawArgs[i+1]
+				i += 2
+			} else {
+				i++
+			}
+			continue
+		}
+
+		if m, val, inline := matchStringFlag(arg, "orchestration-url", "orchestrator-url"); m {
+			if inline {
+				global.OrchestrationURL = val
+				i++
+			} else if i+1 < len(rawArgs) {
+				global.OrchestrationURL = rawArgs[i+1]
+				i += 2
+			} else {
+				i++
+			}
+			continue
+		}
+
+		if m, val, inline := matchStringFlag(arg, "env-file"); m {
+			if inline {
+				global.EnvPath = val
+				i++
+			} else if i+1 < len(rawArgs) {
+				global.EnvPath = rawArgs[i+1]
+				i += 2
+			} else {
+				i++
+			}
+			continue
+		}
+
+		if m, val, inline := matchStringFlag(arg, "trace-id"); m {
+			if inline {
+				global.TraceID = val
+				i++
+			} else if i+1 < len(rawArgs) {
+				global.TraceID = rawArgs[i+1]
+				i += 2
+			} else {
+				i++
+			}
+			continue
+		}
+
+		if m, val, inline := matchStringFlag(arg, "timeout"); m {
+			var durStr string
+			if inline {
+				durStr = val
+				i++
+			} else if i+1 < len(rawArgs) {
+				durStr = rawArgs[i+1]
+				i += 2
+			} else {
+				i++
+			}
+			if d, err := time.ParseDuration(durStr); err == nil {
+				global.Timeout = d
+			}
+			continue
+		}
+
+		if subcommand == "" && !strings.HasPrefix(arg, "-") {
+			subcommand = arg
+			i++
+			continue
+		}
+
+		subcommandArgs = append(subcommandArgs, arg)
+		i++
+	}
+
+	if global.OrchestrationURL != "" && global.WorkingURL == "" {
+		global.WorkingURL = global.OrchestrationURL
+	}
+
+	return global, subcommand, subcommandArgs
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(1)
 	}
 
-	command := os.Args[1]
-	args := os.Args[2:]
+	global, command, args := parseArgs(os.Args[1:])
+
+	if global.Verbose {
+		telemetry.SetVerbose(true)
+	}
 
 	switch command {
 	case "filter":
-		runFilter(args)
+		runFilter(global, args)
 	case "recall":
-		runRecall(args)
+		runRecall(global, args)
 	case "deliberate":
-		runDeliberate(args)
+		runDeliberate(global, args)
 	case "consolidate":
-		runConsolidate(args)
+		runConsolidate(global, args)
 	case "orchestrate", "run-loop":
-		runOrchestrate(args)
+		runOrchestrate(global, args)
 	case "status", "health":
-		runStatus(args)
+		runStatus(global, args)
 	case "env", "config":
-		runEnv(args)
+		runEnv(global, args)
 	case "version", "--version", "-v":
 		outputJSON(map[string]string{
 			"tool":    "sekha-cluster-tool",
@@ -53,6 +265,9 @@ func main() {
 		})
 	case "help", "--help", "-h":
 		printUsage()
+	case "":
+		printUsage()
+		os.Exit(1)
 	default:
 		fmt.Fprintf(os.Stderr, "Error: Unknown subcommand '%s'\n\n", command)
 		printUsage()
@@ -64,7 +279,8 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, `sekha-cluster-tool - Tri-Node Cognitive Cluster Orchestration CLI (%s)
 
 Usage:
-  sekha-cluster-tool <command> [arguments...]
+  sekha-cluster-tool [global flags] <command> [arguments...]
+  sekha-cluster-tool <command> [global flags] [arguments...]
 
 Subcommands:
   filter        Dispatch raw sensory streams to sensory attention gate (:8081)
@@ -76,13 +292,15 @@ Subcommands:
   env           Manage and inspect cluster environment configuration (init, show)
   version       Display tool version and build information
 
-Global / Configuration Flags:
-  --env-file <path>    Path to .env configuration file (searches ./.env, ./.env.local by default)
-  --sensory-url <url>   Sensory filter endpoint URL (legacy alias: --node3-url)
-  --working-url <url>   Working memory scratchpad URL (legacy alias: --node2-url)
-  --knowledge-url <url> Knowledge store & recall URL (legacy alias: --node1-url)
-  --verbose            Enable diagnostic step logs on stderr (stdout remains clean JSON)
-  --trace-id <id>      Specify or propagate an explicit X-Trace-ID
+Global Flags:
+  --env-file <path>          Path to .env configuration file (searches ./.env, ./.env.local by default)
+  --sensory-url <url>        Sensory filter endpoint URL (legacy alias: --node3-url)
+  --working-url <url>        Working memory scratchpad URL (legacy alias: --node2-url)
+  --knowledge-url <url>      Knowledge store & recall URL (legacy alias: --node1-url)
+  --orchestration-url <url>  Orchestration working memory URL alias
+  --verbose                  Enable diagnostic step logs on stderr (stdout remains clean JSON)
+  --trace-id <id>            Specify or propagate an explicit X-Trace-ID
+  --timeout <duration>       Operation or probe timeout budget (e.g. 1500ms, 2s)
 
 Environment Variables (.env / OS):
   CLUSTER_ENV_FILE       Path to custom .env configuration file
@@ -125,16 +343,18 @@ func readInput(textFlag, fileFlag string) (string, error) {
 	return "", nil
 }
 
-// pickURL returns the first non-empty URL between generic and legacy flags.
-func pickURL(primary, legacy string) string {
-	if primary != "" {
-		return primary
+// pickURL returns the first non-empty URL among candidates.
+func pickURL(candidates ...string) string {
+	for _, c := range candidates {
+		if c != "" {
+			return c
+		}
 	}
-	return legacy
+	return ""
 }
 
 // runEnv handles the 'env' / 'config' subcommand (init, show).
-func runEnv(args []string) {
+func runEnv(global GlobalFlags, args []string) {
 	if len(args) == 0 {
 		fmt.Fprintf(os.Stderr, "Usage: sekha-cluster-tool env [init|show] [options...]\n")
 		os.Exit(1)
@@ -162,7 +382,10 @@ func runEnv(args []string) {
 		_ = fs.Parse(actionArgs)
 
 		cfg, err := config.Load(config.FlagOverrides{
-			EnvPath: *envFileFlag,
+			EnvPath:      pickURL(*envFileFlag, global.EnvPath),
+			SensoryURL:   global.SensoryURL,
+			WorkingURL:   global.WorkingURL,
+			KnowledgeURL: global.KnowledgeURL,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
@@ -177,7 +400,7 @@ func runEnv(args []string) {
 }
 
 // runFilter handles the 'filter' subcommand.
-func runFilter(args []string) {
+func runFilter(global GlobalFlags, args []string) {
 	fs := flag.NewFlagSet("filter", flag.ExitOnError)
 	textFlag := fs.String("text", "", "Raw text input to filter")
 	fileFlag := fs.String("file", "", "Path to text file (or '-' for stdin)")
@@ -192,16 +415,22 @@ func runFilter(args []string) {
 	verboseFlag := fs.Bool("verbose", false, "Enable stderr diagnostic logs")
 	_ = fs.Parse(args)
 
-	telemetry.SetVerbose(*verboseFlag)
-	traceID := *traceIDFlag
+	verbose := global.Verbose || *verboseFlag
+	telemetry.SetVerbose(verbose)
+	traceID := pickURL(*traceIDFlag, global.TraceID)
 	if traceID == "" {
 		traceID = telemetry.GenerateTraceID()
 	}
 
+	timeout := *timeoutFlag
+	if timeout == 0 && global.Timeout > 0 {
+		timeout = global.Timeout
+	}
+
 	cfg, err := config.Load(config.FlagOverrides{
-		EnvPath:           *envFileFlag,
-		SensoryURL:        pickURL(*sensoryURLFlag, *node3URLFlag),
-		Timeout:           *timeoutFlag,
+		EnvPath:           pickURL(*envFileFlag, global.EnvPath),
+		SensoryURL:        pickURL(*sensoryURLFlag, *node3URLFlag, global.SensoryURL),
+		Timeout:           timeout,
 		SalienceThreshold: *thresholdFlag,
 	})
 	if err != nil {
@@ -241,7 +470,7 @@ func runFilter(args []string) {
 }
 
 // runRecall handles the 'recall' subcommand.
-func runRecall(args []string) {
+func runRecall(global GlobalFlags, args []string) {
 	fs := flag.NewFlagSet("recall", flag.ExitOnError)
 	queryFlag := fs.String("query", "", "Search query for associative knowledge recall")
 	topKFlag := fs.Int("top-k", 0, "Number of ranked nodes to retrieve")
@@ -257,8 +486,9 @@ func runRecall(args []string) {
 	verboseFlag := fs.Bool("verbose", false, "Enable stderr diagnostic logs")
 	_ = fs.Parse(args)
 
-	telemetry.SetVerbose(*verboseFlag)
-	traceID := *traceIDFlag
+	verbose := global.Verbose || *verboseFlag
+	telemetry.SetVerbose(verbose)
+	traceID := pickURL(*traceIDFlag, global.TraceID)
 	if traceID == "" {
 		traceID = telemetry.GenerateTraceID()
 	}
@@ -267,10 +497,15 @@ func runRecall(args []string) {
 		outputError(traceID, "--query flag is required")
 	}
 
+	timeout := *timeoutFlag
+	if timeout == 0 && global.Timeout > 0 {
+		timeout = global.Timeout
+	}
+
 	cfg, err := config.Load(config.FlagOverrides{
-		EnvPath:      *envFileFlag,
-		KnowledgeURL: pickURL(*knowledgeURLFlag, *node1URLFlag),
-		Timeout:      *timeoutFlag,
+		EnvPath:      pickURL(*envFileFlag, global.EnvPath),
+		KnowledgeURL: pickURL(*knowledgeURLFlag, *node1URLFlag, global.KnowledgeURL),
+		Timeout:      timeout,
 		RecallTopK:   *topKFlag,
 	})
 	if err != nil {
@@ -303,7 +538,7 @@ func runRecall(args []string) {
 }
 
 // runDeliberate handles the 'deliberate' subcommand.
-func runDeliberate(args []string) {
+func runDeliberate(global GlobalFlags, args []string) {
 	fs := flag.NewFlagSet("deliberate", flag.ExitOnError)
 	taskFlag := fs.String("task", "", "Deliberation objective or prompt task")
 	inputFlag := fs.String("input", "", "Salient input text or sensory chunks JSON")
@@ -313,14 +548,16 @@ func runDeliberate(args []string) {
 	temperatureFlag := fs.Float64("temperature", 0.2, "Sampling temperature")
 	workingURLFlag := fs.String("working-url", "", "Working memory scratchpad endpoint URL")
 	node2URLFlag := fs.String("node2-url", "", "Legacy alias for --working-url")
+	orchestrationURLFlag := fs.String("orchestration-url", "", "Alias for working memory URL")
 	envFileFlag := fs.String("env-file", "", "Path to .env configuration file")
 	timeoutFlag := fs.Duration("timeout", 0, "Operation timeout budget")
 	traceIDFlag := fs.String("trace-id", "", "Distributed trace ID")
 	verboseFlag := fs.Bool("verbose", false, "Enable stderr diagnostic logs")
 	_ = fs.Parse(args)
 
-	telemetry.SetVerbose(*verboseFlag)
-	traceID := *traceIDFlag
+	verbose := global.Verbose || *verboseFlag
+	telemetry.SetVerbose(verbose)
+	traceID := pickURL(*traceIDFlag, global.TraceID)
 	if traceID == "" {
 		traceID = telemetry.GenerateTraceID()
 	}
@@ -329,10 +566,16 @@ func runDeliberate(args []string) {
 		outputError(traceID, "--task flag is required")
 	}
 
+	timeout := *timeoutFlag
+	if timeout == 0 && global.Timeout > 0 {
+		timeout = global.Timeout
+	}
+
 	cfg, err := config.Load(config.FlagOverrides{
-		EnvPath:           *envFileFlag,
-		WorkingURL:        pickURL(*workingURLFlag, *node2URLFlag),
-		DeliberateTimeout: *timeoutFlag,
+		EnvPath:           pickURL(*envFileFlag, global.EnvPath),
+		WorkingURL:        pickURL(*workingURLFlag, *node2URLFlag, *orchestrationURLFlag, global.WorkingURL, global.OrchestrationURL),
+		OrchestrationURL: pickURL(*orchestrationURLFlag, global.OrchestrationURL),
+		DeliberateTimeout: timeout,
 	})
 	if err != nil {
 		outputError(traceID, err.Error())
@@ -395,7 +638,7 @@ func runDeliberate(args []string) {
 }
 
 // runConsolidate handles the 'consolidate' subcommand.
-func runConsolidate(args []string) {
+func runConsolidate(global GlobalFlags, args []string) {
 	fs := flag.NewFlagSet("consolidate", flag.ExitOnError)
 	traceJSONFlag := fs.String("trace", "", "JSON string or path to episodic trace file")
 	sessionIDFlag := fs.String("session-id", "", "Session identifier")
@@ -410,16 +653,22 @@ func runConsolidate(args []string) {
 	verboseFlag := fs.Bool("verbose", false, "Enable stderr diagnostic logs")
 	_ = fs.Parse(args)
 
-	telemetry.SetVerbose(*verboseFlag)
-	traceID := *traceIDFlag
+	verbose := global.Verbose || *verboseFlag
+	telemetry.SetVerbose(verbose)
+	traceID := pickURL(*traceIDFlag, global.TraceID)
 	if traceID == "" {
 		traceID = telemetry.GenerateTraceID()
 	}
 
+	timeout := *timeoutFlag
+	if timeout == 0 && global.Timeout > 0 {
+		timeout = global.Timeout
+	}
+
 	cfg, err := config.Load(config.FlagOverrides{
-		EnvPath:      *envFileFlag,
-		KnowledgeURL: pickURL(*knowledgeURLFlag, *node1URLFlag),
-		Timeout:      *timeoutFlag,
+		EnvPath:      pickURL(*envFileFlag, global.EnvPath),
+		KnowledgeURL: pickURL(*knowledgeURLFlag, *node1URLFlag, global.KnowledgeURL),
+		Timeout:      timeout,
 	})
 	if err != nil {
 		outputError(traceID, err.Error())
@@ -474,7 +723,7 @@ func runConsolidate(args []string) {
 }
 
 // runOrchestrate handles the 'orchestrate' / 'run-loop' subcommand.
-func runOrchestrate(args []string) {
+func runOrchestrate(global GlobalFlags, args []string) {
 	fs := flag.NewFlagSet("orchestrate", flag.ExitOnError)
 	inputFlag := fs.String("input", "", "Raw sensory stream or log text")
 	fileFlag := fs.String("file", "", "Path to raw input file (or '-' for stdin)")
@@ -490,24 +739,30 @@ func runOrchestrate(args []string) {
 	node3URLFlag := fs.String("node3-url", "", "Legacy alias for --sensory-url")
 	node2URLFlag := fs.String("node2-url", "", "Legacy alias for --working-url")
 	node1URLFlag := fs.String("node1-url", "", "Legacy alias for --knowledge-url")
+	orchestrationURLFlag := fs.String("orchestration-url", "", "Alias for working memory URL")
 	envFileFlag := fs.String("env-file", "", "Path to .env configuration file")
 	traceIDFlag := fs.String("trace-id", "", "Distributed trace ID")
 	verboseFlag := fs.Bool("verbose", false, "Enable stderr diagnostic logs")
 	_ = fs.Parse(args)
 
-	telemetry.SetVerbose(*verboseFlag)
-	traceID := *traceIDFlag
+	verbose := global.Verbose || *verboseFlag
+	telemetry.SetVerbose(verbose)
+	traceID := pickURL(*traceIDFlag, global.TraceID)
 	if traceID == "" {
 		traceID = telemetry.GenerateTraceID()
 	}
 
+	timeout := global.Timeout
+
 	cfg, err := config.Load(config.FlagOverrides{
-		EnvPath:           *envFileFlag,
-		SensoryURL:        pickURL(*sensoryURLFlag, *node3URLFlag),
-		WorkingURL:        pickURL(*workingURLFlag, *node2URLFlag),
-		KnowledgeURL:      pickURL(*knowledgeURLFlag, *node1URLFlag),
+		EnvPath:          pickURL(*envFileFlag, global.EnvPath),
+		SensoryURL:       pickURL(*sensoryURLFlag, *node3URLFlag, global.SensoryURL),
+		WorkingURL:       pickURL(*workingURLFlag, *node2URLFlag, *orchestrationURLFlag, global.WorkingURL, global.OrchestrationURL),
+		KnowledgeURL:     pickURL(*knowledgeURLFlag, *node1URLFlag, global.KnowledgeURL),
+		OrchestrationURL: pickURL(*orchestrationURLFlag, global.OrchestrationURL),
+		Timeout:          timeout,
 		SalienceThreshold: *thresholdFlag,
-		RecallTopK:        *topKFlag,
+		RecallTopK:       *topKFlag,
 	})
 	if err != nil {
 		outputError(traceID, err.Error())
@@ -548,7 +803,7 @@ func runOrchestrate(args []string) {
 }
 
 // runStatus queries and aggregates operational health across configured cluster endpoints.
-func runStatus(args []string) {
+func runStatus(global GlobalFlags, args []string) {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	sensoryURLFlag := fs.String("sensory-url", "", "Sensory filter endpoint URL")
 	workingURLFlag := fs.String("working-url", "", "Working memory scratchpad endpoint URL")
@@ -556,23 +811,32 @@ func runStatus(args []string) {
 	node3URLFlag := fs.String("node3-url", "", "Legacy alias for --sensory-url")
 	node2URLFlag := fs.String("node2-url", "", "Legacy alias for --working-url")
 	node1URLFlag := fs.String("node1-url", "", "Legacy alias for --knowledge-url")
+	orchestrationURLFlag := fs.String("orchestration-url", "", "Alias for working memory URL")
 	envFileFlag := fs.String("env-file", "", "Path to .env configuration file")
 	timeoutFlag := fs.Duration("timeout", 1500*time.Millisecond, "Probe timeout per node")
 	traceIDFlag := fs.String("trace-id", "", "Distributed trace ID")
 	verboseFlag := fs.Bool("verbose", false, "Enable stderr diagnostic logs")
 	_ = fs.Parse(args)
 
-	telemetry.SetVerbose(*verboseFlag)
-	traceID := *traceIDFlag
+	verbose := global.Verbose || *verboseFlag
+	telemetry.SetVerbose(verbose)
+	traceID := pickURL(*traceIDFlag, global.TraceID)
 	if traceID == "" {
 		traceID = telemetry.GenerateTraceID()
 	}
 
+	timeout := *timeoutFlag
+	if global.Timeout > 0 {
+		timeout = global.Timeout
+	}
+
 	cfg, err := config.Load(config.FlagOverrides{
-		EnvPath:      *envFileFlag,
-		SensoryURL:   pickURL(*sensoryURLFlag, *node3URLFlag),
-		WorkingURL:   pickURL(*workingURLFlag, *node2URLFlag),
-		KnowledgeURL: pickURL(*knowledgeURLFlag, *node1URLFlag),
+		EnvPath:          pickURL(*envFileFlag, global.EnvPath),
+		SensoryURL:       pickURL(*sensoryURLFlag, *node3URLFlag, global.SensoryURL),
+		WorkingURL:       pickURL(*workingURLFlag, *node2URLFlag, *orchestrationURLFlag, global.WorkingURL, global.OrchestrationURL),
+		KnowledgeURL:     pickURL(*knowledgeURLFlag, *node1URLFlag, global.KnowledgeURL),
+		OrchestrationURL: pickURL(*orchestrationURLFlag, global.OrchestrationURL),
+		Timeout:          timeout,
 	})
 	if err != nil {
 		outputError(traceID, err.Error())
@@ -600,9 +864,9 @@ func runStatus(args []string) {
 			Error:  "Endpoint address not set in .env, environment, flags, or build",
 		}
 	} else {
-		sClient := client.NewSensoryClient(cfg.SensoryURL, *timeoutFlag)
+		sClient := client.NewSensoryClient(cfg.SensoryURL, timeout)
 		t0 := time.Now()
-		ctx3, cancel3 := context.WithTimeout(context.Background(), *timeoutFlag)
+		ctx3, cancel3 := context.WithTimeout(context.Background(), timeout)
 		sStats, err := sClient.GetStats(ctx3, traceID)
 		cancel3()
 		d3 := float64(time.Since(t0).Microseconds()) / 1000.0
@@ -637,9 +901,9 @@ func runStatus(args []string) {
 			Error:  "Endpoint address not set in .env, environment, flags, or build",
 		}
 	} else {
-		wClient := client.NewWorkingClient(cfg.WorkingURL, *timeoutFlag)
+		wClient := client.NewWorkingClient(cfg.WorkingURL, timeout)
 		t1 := time.Now()
-		ctx2, cancel2 := context.WithTimeout(context.Background(), *timeoutFlag)
+		ctx2, cancel2 := context.WithTimeout(context.Background(), timeout)
 		wHealth, err := wClient.GetHealth(ctx2, traceID)
 		cancel2()
 		d2 := float64(time.Since(t1).Microseconds()) / 1000.0
@@ -674,9 +938,9 @@ func runStatus(args []string) {
 			Error:  "Endpoint address not set in .env, environment, flags, or build",
 		}
 	} else {
-		kClient := client.NewKnowledgeClient(cfg.KnowledgeURL, *timeoutFlag)
+		kClient := client.NewKnowledgeClient(cfg.KnowledgeURL, timeout)
 		t2 := time.Now()
-		ctx1, cancel1 := context.WithTimeout(context.Background(), *timeoutFlag)
+		ctx1, cancel1 := context.WithTimeout(context.Background(), timeout)
 		kHealth, err := kClient.GetHealth(ctx1, traceID)
 		cancel1()
 		d1 := float64(time.Since(t2).Microseconds()) / 1000.0

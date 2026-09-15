@@ -135,3 +135,60 @@ func TestConfig_FlagOverrides(t *testing.T) {
 		t.Errorf("expected ValidateAll to pass with flags set, got: %v", err)
 	}
 }
+
+func TestConfig_BuildTimeInjectedVariables(t *testing.T) {
+	// Clean environment
+	os.Unsetenv("CLUSTER_SENSORY_URL")
+	os.Unsetenv("CLUSTER_WORKING_URL")
+	os.Unsetenv("CLUSTER_KNOWLEDGE_URL")
+
+	BuildSensoryURL = "http://build-sensory:8081"
+	BuildWorkingURL = "http://build-working:8083"
+	BuildKnowledgeURL = "http://build-knowledge:8084"
+	defer func() {
+		BuildSensoryURL = ""
+		BuildWorkingURL = ""
+		BuildKnowledgeURL = ""
+	}()
+
+	// Blank flags, no .env file
+	cfg, err := Load(FlagOverrides{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.SensoryURL != "http://build-sensory:8081" {
+		t.Errorf("expected build sensory URL, got '%s'", cfg.SensoryURL)
+	}
+	if cfg.WorkingURL != "http://build-working:8083" {
+		t.Errorf("expected build working URL, got '%s'", cfg.WorkingURL)
+	}
+	if cfg.KnowledgeURL != "http://build-knowledge:8084" {
+		t.Errorf("expected build knowledge URL, got '%s'", cfg.KnowledgeURL)
+	}
+
+	// Flag override must take precedence over build-time variables
+	flags := FlagOverrides{
+		SensoryURL: "http://override-sensory:8081",
+	}
+	cfgOverride, err := Load(flags)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfgOverride.SensoryURL != "http://override-sensory:8081" {
+		t.Errorf("flag should override build-time variable; got '%s'", cfgOverride.SensoryURL)
+	}
+}
+
+func TestConfig_OrchestrationURLOverride(t *testing.T) {
+	flags := FlagOverrides{
+		OrchestrationURL: "http://orchestrator-working:8083",
+	}
+	cfg, err := Load(flags)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.WorkingURL != "http://orchestrator-working:8083" {
+		t.Errorf("expected OrchestrationURL to set WorkingURL when WorkingURL is empty; got '%s'", cfg.WorkingURL)
+	}
+}

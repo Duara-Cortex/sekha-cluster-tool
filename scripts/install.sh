@@ -69,10 +69,57 @@ if ! curl -fsSL -o "${TMP_DIR}/${TARBALL_NAME}" "$DOWNLOAD_URL"; then
 
     if command -v go >/dev/null 2>&1; then
         echo "==> Go compiler detected. Compiling from source..."
-        GOBIN="$INSTALL_DIR" go install "github.com/${REPO}/cmd/${TOOL_NAME}@${VERSION}" || {
-            echo "Error: Source compilation fallback failed." >&2
-            exit 1
-        }
+
+        # Resolve .env file
+        ENV_PATH="${ENV_FILE:-${CLUSTER_ENV_FILE:-.env}}"
+        if [ ! -f "$ENV_PATH" ] && [ -f "${HOME}/.config/sekha-cluster-tool/.env" ]; then
+            ENV_PATH="${HOME}/.config/sekha-cluster-tool/.env"
+        fi
+
+        # Extract URLs from env file if not already provided in environment
+        if [ -f "$ENV_PATH" ]; then
+            if [ -z "$SENSORY_URL" ]; then
+                SENSORY_URL="$(grep -E '^CLUSTER_SENSORY_URL=' "$ENV_PATH" | head -n 1 | cut -d= -f2- | tr -d '\r"' | tr -d "'")"
+            fi
+            if [ -z "$WORKING_URL" ]; then
+                WORKING_URL="$(grep -E '^CLUSTER_WORKING_URL=' "$ENV_PATH" | head -n 1 | cut -d= -f2- | tr -d '\r"' | tr -d "'")"
+            fi
+            if [ -z "$KNOWLEDGE_URL" ]; then
+                KNOWLEDGE_URL="$(grep -E '^CLUSTER_KNOWLEDGE_URL=' "$ENV_PATH" | head -n 1 | cut -d= -f2- | tr -d '\r"' | tr -d "'")"
+            fi
+        fi
+
+        CONFIG_PKG="github.com/Duara-Cortex/sekha-cluster-tool/internal/config"
+        BUILD_LDFLAGS="-s -w -X 'main.Version=${VERSION}'"
+        if [ -n "$SENSORY_URL" ]; then
+            BUILD_LDFLAGS="${BUILD_LDFLAGS} -X '${CONFIG_PKG}.BuildSensoryURL=${SENSORY_URL}'"
+        fi
+        if [ -n "$WORKING_URL" ]; then
+            BUILD_LDFLAGS="${BUILD_LDFLAGS} -X '${CONFIG_PKG}.BuildWorkingURL=${WORKING_URL}'"
+        fi
+        if [ -n "$KNOWLEDGE_URL" ]; then
+            BUILD_LDFLAGS="${BUILD_LDFLAGS} -X '${CONFIG_PKG}.BuildKnowledgeURL=${KNOWLEDGE_URL}'"
+        fi
+
+        SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo "")"
+        REPO_ROOT=""
+        if [ -n "$SCRIPT_DIR" ] && [ -f "${SCRIPT_DIR}/../go.mod" ]; then
+            REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+        elif [ -f "./go.mod" ]; then
+            REPO_ROOT="$(pwd)"
+        fi
+
+        if [ -n "$REPO_ROOT" ] && [ -d "${REPO_ROOT}/cmd/${TOOL_NAME}" ]; then
+            (cd "$REPO_ROOT" && go build -ldflags="${BUILD_LDFLAGS}" -o "${INSTALL_DIR}/${TOOL_NAME}" "./cmd/${TOOL_NAME}") || {
+                echo "Error: Local source compilation failed." >&2
+                exit 1
+            }
+        else
+            GOBIN="$INSTALL_DIR" go install -ldflags="${BUILD_LDFLAGS}" "github.com/${REPO}/cmd/${TOOL_NAME}@${VERSION}" || {
+                echo "Error: Source compilation fallback failed." >&2
+                exit 1
+            }
+        fi
         echo "==> Successfully installed ${TOOL_NAME} to ${INSTALL_DIR}/${TOOL_NAME}"
         exit 0
     else
