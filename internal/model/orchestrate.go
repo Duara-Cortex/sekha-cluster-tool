@@ -6,9 +6,12 @@ type OrchestrateRequest struct {
 	TaskDirective          string  `json:"task_directive,omitempty"`
 	FilterThreshold        float64 `json:"filter_threshold,omitempty"`
 	RecallTopK             int     `json:"recall_top_k,omitempty"`
-	MaxTokens              int     `json:"max_tokens,omitempty"`
-	SessionID              string  `json:"session_id,omitempty"`
-	SynchronousConsolidate bool    `json:"synchronous_consolidate,omitempty"`
+	MaxTokens              int      `json:"max_tokens,omitempty"`
+	SessionID              string   `json:"session_id,omitempty"`
+	SynchronousConsolidate bool     `json:"synchronous_consolidate,omitempty"`
+	Anchors                []string `json:"anchors,omitempty"`
+	AnchorMode             string   `json:"anchor_mode,omitempty"`
+	IncludeEmbeddings      bool     `json:"include_embeddings,omitempty"`
 }
 
 // StageTelemetry tracks execution duration and status for an individual stage in the cognitive loop.

@@ -32,6 +32,7 @@ type ConsolidateRequest struct {
 	SensoryContext   []SensoryItem     `json:"sensory_context,omitempty"`
 	Trajectory       []TrajectoryStep  `json:"trajectory,omitempty"`
 	CandidateActions []CandidateAction `json:"candidate_actions,omitempty"`
+	Anchors          []string          `json:"anchors,omitempty"`
 	Synchronous      bool              `json:"synchronous,omitempty"`
 }
 

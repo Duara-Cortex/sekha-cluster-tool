@@ -25,14 +25,29 @@ var (
 
 // GlobalFlags captures CLI arguments specified globally across any subcommand position.
 type GlobalFlags struct {
-	EnvPath          string
-	SensoryURL       string
-	WorkingURL       string
-	KnowledgeURL     string
-	OrchestrationURL string
-	TraceID          string
-	Verbose          bool
-	Timeout          time.Duration
+	EnvPath           string
+	SensoryURL        string
+	WorkingURL        string
+	KnowledgeURL      string
+	OrchestrationURL  string
+	TraceID           string
+	Verbose           bool
+	Timeout           time.Duration
+	Anchors           []string
+	AnchorMode        string
+	IncludeEmbeddings bool
+}
+
+// anchorSliceFlag enables repeatable and comma-delimited string flags.
+type anchorSliceFlag []string
+
+func (f *anchorSliceFlag) String() string {
+	return strings.Join(*f, ",")
+}
+
+func (f *anchorSliceFlag) Set(val string) error {
+	*f = append(*f, val)
+	return nil
 }
 
 func matchStringFlag(arg string, names ...string) (bool, string, bool) {
@@ -214,6 +229,38 @@ func parseArgs(rawArgs []string) (GlobalFlags, string, []string) {
 			continue
 		}
 
+		if m, val, inline := matchStringFlag(arg, "anchor", "a"); m {
+			if inline {
+				global.Anchors = append(global.Anchors, val)
+				i++
+			} else if i+1 < len(rawArgs) {
+				global.Anchors = append(global.Anchors, rawArgs[i+1])
+				i += 2
+			} else {
+				i++
+			}
+			continue
+		}
+
+		if m, val, inline := matchStringFlag(arg, "anchor-mode"); m {
+			if inline {
+				global.AnchorMode = val
+				i++
+			} else if i+1 < len(rawArgs) {
+				global.AnchorMode = rawArgs[i+1]
+				i += 2
+			} else {
+				i++
+			}
+			continue
+		}
+
+		if m, val, _ := matchBoolFlag(arg, "include-embeddings"); m {
+			global.IncludeEmbeddings = val
+			i++
+			continue
+		}
+
 		if subcommand == "" && !strings.HasPrefix(arg, "-") {
 			subcommand = arg
 			i++
@@ -298,6 +345,9 @@ Global Flags:
   --working-url <url>        Working memory scratchpad URL (legacy alias: --node2-url)
   --knowledge-url <url>      Knowledge store & recall URL (legacy alias: --node1-url)
   --orchestration-url <url>  Orchestration working memory URL alias
+  --anchor, -a <tag>         Target anchor tag (repeatable or comma-delimited, e.g. -a "#project:kestrel")
+  --anchor-mode <mode>       Anchor recall mode: boost or filter (default: boost)
+  --include-embeddings       Include vector embeddings in recall responses (default: false)
   --verbose                  Enable diagnostic step logs on stderr (stdout remains clean JSON)
   --trace-id <id>            Specify or propagate an explicit X-Trace-ID
   --timeout <duration>       Operation or probe timeout budget (e.g. 1500ms, 2s)
@@ -484,6 +534,11 @@ func runRecall(global GlobalFlags, args []string) {
 	timeoutFlag := fs.Duration("timeout", 0, "Operation timeout budget")
 	traceIDFlag := fs.String("trace-id", "", "Distributed trace ID")
 	verboseFlag := fs.Bool("verbose", false, "Enable stderr diagnostic logs")
+	var anchorFlags anchorSliceFlag
+	fs.Var(&anchorFlags, "anchor", "Target anchor tag (repeatable or comma-delimited, e.g. -a \"#project:kestrel\")")
+	fs.Var(&anchorFlags, "a", "Target anchor tag alias")
+	anchorModeFlag := fs.String("anchor-mode", "boost", "Anchor recall mode: boost or filter (default: boost)")
+	includeEmbeddingsFlag := fs.Bool("include-embeddings", false, "Include vector embeddings in recall results (default: false)")
 	_ = fs.Parse(args)
 
 	verbose := global.Verbose || *verboseFlag
@@ -496,6 +551,21 @@ func runRecall(global GlobalFlags, args []string) {
 	if *queryFlag == "" {
 		outputError(traceID, "--query flag is required")
 	}
+
+	anchors := model.ParseAnchors(append(global.Anchors, anchorFlags...)...)
+
+	anchorMode := strings.ToLower(strings.TrimSpace(*anchorModeFlag))
+	if anchorMode == "boost" && global.AnchorMode != "" {
+		anchorMode = strings.ToLower(strings.TrimSpace(global.AnchorMode))
+	}
+	if anchorMode == "" {
+		anchorMode = "boost"
+	}
+	if anchorMode != "boost" && anchorMode != "filter" {
+		outputError(traceID, fmt.Sprintf("invalid --anchor-mode '%s': must be 'boost' or 'filter'", *anchorModeFlag))
+	}
+
+	includeEmbeddings := *includeEmbeddingsFlag || global.IncludeEmbeddings
 
 	timeout := *timeoutFlag
 	if timeout == 0 && global.Timeout > 0 {
@@ -521,12 +591,15 @@ func runRecall(global GlobalFlags, args []string) {
 	defer cancel()
 
 	req := model.RecallRequest{
-		Query:      *queryFlag,
-		TopK:       cfg.RecallTopK,
-		Alpha:      *alphaFlag,
-		Beta:       *betaFlag,
-		Gamma:      *gammaFlag,
-		ExpandHops: *hopsFlag,
+		Query:             *queryFlag,
+		TopK:              cfg.RecallTopK,
+		Alpha:             *alphaFlag,
+		Beta:              *betaFlag,
+		Gamma:             *gammaFlag,
+		ExpandHops:        *hopsFlag,
+		Anchors:           anchors,
+		AnchorMode:        anchorMode,
+		IncludeEmbeddings: includeEmbeddings,
 	}
 
 	resp, err := knowledgeClient.Recall(ctx, req, traceID)
@@ -651,6 +724,9 @@ func runConsolidate(global GlobalFlags, args []string) {
 	timeoutFlag := fs.Duration("timeout", 0, "Operation timeout budget")
 	traceIDFlag := fs.String("trace-id", "", "Distributed trace ID")
 	verboseFlag := fs.Bool("verbose", false, "Enable stderr diagnostic logs")
+	var anchorFlags anchorSliceFlag
+	fs.Var(&anchorFlags, "anchor", "Target anchor tag (repeatable or comma-delimited, e.g. -a \"#project:kestrel\")")
+	fs.Var(&anchorFlags, "a", "Target anchor tag alias")
 	_ = fs.Parse(args)
 
 	verbose := global.Verbose || *verboseFlag
@@ -659,6 +735,8 @@ func runConsolidate(global GlobalFlags, args []string) {
 	if traceID == "" {
 		traceID = telemetry.GenerateTraceID()
 	}
+
+	anchors := model.ParseAnchors(append(global.Anchors, anchorFlags...)...)
 
 	timeout := *timeoutFlag
 	if timeout == 0 && global.Timeout > 0 {
@@ -693,6 +771,10 @@ func runConsolidate(global GlobalFlags, args []string) {
 		if err := json.Unmarshal(content, &req); err != nil {
 			outputError(traceID, fmt.Sprintf("Error unmarshalling trace JSON: %v", err))
 		}
+	}
+
+	if len(anchors) > 0 {
+		req.Anchors = model.ParseAnchors(append(req.Anchors, anchors...)...)
 	}
 
 	if *sessionIDFlag != "" {
@@ -743,6 +825,11 @@ func runOrchestrate(global GlobalFlags, args []string) {
 	envFileFlag := fs.String("env-file", "", "Path to .env configuration file")
 	traceIDFlag := fs.String("trace-id", "", "Distributed trace ID")
 	verboseFlag := fs.Bool("verbose", false, "Enable stderr diagnostic logs")
+	var anchorFlags anchorSliceFlag
+	fs.Var(&anchorFlags, "anchor", "Target anchor tag (repeatable or comma-delimited, e.g. -a \"#project:kestrel\")")
+	fs.Var(&anchorFlags, "a", "Target anchor tag alias")
+	anchorModeFlag := fs.String("anchor-mode", "boost", "Anchor recall mode: boost or filter (default: boost)")
+	includeEmbeddingsFlag := fs.Bool("include-embeddings", false, "Include vector embeddings in recall results (default: false)")
 	_ = fs.Parse(args)
 
 	verbose := global.Verbose || *verboseFlag
@@ -751,6 +838,21 @@ func runOrchestrate(global GlobalFlags, args []string) {
 	if traceID == "" {
 		traceID = telemetry.GenerateTraceID()
 	}
+
+	anchors := model.ParseAnchors(append(global.Anchors, anchorFlags...)...)
+
+	anchorMode := strings.ToLower(strings.TrimSpace(*anchorModeFlag))
+	if anchorMode == "boost" && global.AnchorMode != "" {
+		anchorMode = strings.ToLower(strings.TrimSpace(global.AnchorMode))
+	}
+	if anchorMode == "" {
+		anchorMode = "boost"
+	}
+	if anchorMode != "boost" && anchorMode != "filter" {
+		outputError(traceID, fmt.Sprintf("invalid --anchor-mode '%s': must be 'boost' or 'filter'", *anchorModeFlag))
+	}
+
+	includeEmbeddings := *includeEmbeddingsFlag || global.IncludeEmbeddings
 
 	timeout := global.Timeout
 
@@ -792,6 +894,9 @@ func runOrchestrate(global GlobalFlags, args []string) {
 		MaxTokens:              *maxTokensFlag,
 		SessionID:              *sessionIDFlag,
 		SynchronousConsolidate: *syncFlag,
+		Anchors:                anchors,
+		AnchorMode:             anchorMode,
+		IncludeEmbeddings:      includeEmbeddings,
 	}
 
 	resp, err := orch.RunCycle(ctx, req, traceID)
