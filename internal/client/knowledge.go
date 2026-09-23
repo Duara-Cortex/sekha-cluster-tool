@@ -26,8 +26,22 @@ func NewKnowledgeClient(baseURL string, timeout time.Duration) *KnowledgeClient 
 // Recall queries the Node 1 relational knowledge graph for relevant subgraphs.
 func (c *KnowledgeClient) Recall(ctx context.Context, req model.RecallRequest, traceID string) (*model.RecallResponse, error) {
 	url := fmt.Sprintf("%s/api/v1/memory/recall", c.baseURL)
+	if req.IncludeEmbeddings {
+		url += "?include_embeddings=true"
+	}
 
-	telemetry.LogStep(traceID, "LongTermRecall", fmt.Sprintf("Querying Node 1 knowledge store (Query: %s, TopK: %d)", req.Query, req.TopK))
+	details := fmt.Sprintf("Query: %s, TopK: %d", req.Query, req.TopK)
+	if len(req.Anchors) > 0 {
+		mode := req.AnchorMode
+		if mode == "" {
+			mode = "boost"
+		}
+		details += fmt.Sprintf(", Anchors: %v, Mode: %s", req.Anchors, mode)
+	}
+	if req.IncludeEmbeddings {
+		details += ", Embeddings: true"
+	}
+	telemetry.LogStep(traceID, "LongTermRecall", fmt.Sprintf("Querying Node 1 knowledge store (%s)", details))
 
 	var resp model.RecallResponse
 	if err := c.client.PostJSON(ctx, url, req, &resp, traceID); err != nil {
@@ -44,7 +58,11 @@ func (c *KnowledgeClient) Recall(ctx context.Context, req model.RecallRequest, t
 func (c *KnowledgeClient) Consolidate(ctx context.Context, req model.ConsolidateRequest, traceID string) (*model.ConsolidateResponse, error) {
 	url := fmt.Sprintf("%s/api/v1/memory/consolidate", c.baseURL)
 
-	telemetry.LogStep(traceID, "Consolidation", fmt.Sprintf("Committing episodic trace to Node 1 (Session: %s, Sync: %t)", req.SessionID, req.Synchronous))
+	details := fmt.Sprintf("Session: %s, Sync: %t", req.SessionID, req.Synchronous)
+	if len(req.Anchors) > 0 {
+		details += fmt.Sprintf(", Anchors: %v", req.Anchors)
+	}
+	telemetry.LogStep(traceID, "Consolidation", fmt.Sprintf("Committing episodic trace to Node 1 (%s)", details))
 
 	var resp model.ConsolidateResponse
 	if err := c.client.PostJSON(ctx, url, req, &resp, traceID); err != nil {

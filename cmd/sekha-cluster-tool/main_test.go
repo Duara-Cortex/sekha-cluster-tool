@@ -7,15 +7,18 @@ import (
 
 func TestParseArgs_FlagPositions(t *testing.T) {
 	tests := []struct {
-		name               string
-		args               []string
-		expectedSubcommand string
-		expectedSensory    string
-		expectedWorking    string
-		expectedKnowledge  string
-		expectedVerbose    bool
-		expectedTimeout    time.Duration
-		expectedArgs       []string
+		name                      string
+		args                      []string
+		expectedSubcommand        string
+		expectedSensory           string
+		expectedWorking           string
+		expectedKnowledge         string
+		expectedVerbose           bool
+		expectedTimeout           time.Duration
+		expectedAnchors           []string
+		expectedAnchorMode        string
+		expectedIncludeEmbeddings bool
+		expectedArgs              []string
 	}{
 		{
 			name:               "subcommand only",
@@ -77,6 +80,35 @@ func TestParseArgs_FlagPositions(t *testing.T) {
 			expectedSensory:    "http://sensory:8081",
 			expectedArgs:       []string{"--text", "hello world"},
 		},
+		{
+			name:               "anchor flag -a before subcommand",
+			args:               []string{"-a", "#project:kestrel", "recall", "--query", "port"},
+			expectedSubcommand: "recall",
+			expectedAnchors:    []string{"#project:kestrel"},
+			expectedArgs:       []string{"--query", "port"},
+		},
+		{
+			name:               "repeatable -a flags after subcommand",
+			args:               []string{"recall", "--query", "port", "-a", "#project:kestrel", "-a", "#auth:jwt"},
+			expectedSubcommand: "recall",
+			expectedAnchors:    []string{"#project:kestrel", "#auth:jwt"},
+			expectedArgs:       []string{"--query", "port"},
+		},
+		{
+			name:               "comma-delimited inline --anchor flag",
+			args:               []string{"recall", "--anchor=#project:kestrel,#auth:jwt", "--query", "port"},
+			expectedSubcommand: "recall",
+			expectedAnchors:    []string{"#project:kestrel,#auth:jwt"},
+			expectedArgs:       []string{"--query", "port"},
+		},
+		{
+			name:                      "anchor-mode and include-embeddings flags",
+			args:                      []string{"recall", "--query", "port", "--anchor-mode", "filter", "--include-embeddings"},
+			expectedSubcommand:        "recall",
+			expectedAnchorMode:        "filter",
+			expectedIncludeEmbeddings: true,
+			expectedArgs:              []string{"--query", "port"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -100,6 +132,21 @@ func TestParseArgs_FlagPositions(t *testing.T) {
 			}
 			if global.Timeout != tt.expectedTimeout {
 				t.Errorf("expected Timeout %v, got %v", tt.expectedTimeout, global.Timeout)
+			}
+			if len(global.Anchors) != len(tt.expectedAnchors) {
+				t.Errorf("expected Anchors %v, got %v", tt.expectedAnchors, global.Anchors)
+			} else {
+				for i := range global.Anchors {
+					if global.Anchors[i] != tt.expectedAnchors[i] {
+						t.Errorf("anchor[%d]: expected '%s', got '%s'", i, tt.expectedAnchors[i], global.Anchors[i])
+					}
+				}
+			}
+			if global.AnchorMode != tt.expectedAnchorMode {
+				t.Errorf("expected AnchorMode '%s', got '%s'", tt.expectedAnchorMode, global.AnchorMode)
+			}
+			if global.IncludeEmbeddings != tt.expectedIncludeEmbeddings {
+				t.Errorf("expected IncludeEmbeddings %v, got %v", tt.expectedIncludeEmbeddings, global.IncludeEmbeddings)
 			}
 			if len(remaining) != len(tt.expectedArgs) {
 				t.Fatalf("expected remaining args length %d, got %d (%v)", len(tt.expectedArgs), len(remaining), remaining)

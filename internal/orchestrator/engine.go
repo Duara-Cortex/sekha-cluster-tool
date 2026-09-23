@@ -118,12 +118,15 @@ func (o *Orchestrator) RunCycle(ctx context.Context, req model.OrchestrateReques
 	}
 
 	recallReq := model.RecallRequest{
-		Query:      recallQuery,
-		TopK:       topK,
-		Alpha:      0.6,
-		Beta:       0.2,
-		Gamma:      0.2,
-		ExpandHops: 1,
+		Query:             recallQuery,
+		TopK:              topK,
+		Alpha:             0.6,
+		Beta:              0.2,
+		Gamma:             0.2,
+		ExpandHops:        1,
+		Anchors:           req.Anchors,
+		AnchorMode:        req.AnchorMode,
+		IncludeEmbeddings: req.IncludeEmbeddings,
 	}
 
 	recallResp, err := o.knowledge.Recall(ctx, recallReq, traceID)
@@ -251,6 +254,7 @@ func (o *Orchestrator) RunCycle(ctx context.Context, req model.OrchestrateReques
 		SensoryContext:   sensoryItems,
 		Trajectory:       trajectorySteps,
 		CandidateActions: delibResp.CandidateActions,
+		Anchors:          req.Anchors,
 		Synchronous:      req.SynchronousConsolidate,
 	}
 

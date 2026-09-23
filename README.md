@@ -136,12 +136,15 @@ sekha-cluster-tool filter \
 ```
 
 ### 3. Associative Recall (`recall`)
-Queries the relational knowledge graph for contextual entities:
+Queries the relational knowledge graph for contextual entities (returns lean schema without embeddings by default):
 
 ```bash
 sekha-cluster-tool recall \
   --query "Hardware failure policies" \
-  --top-k 3
+  --top-k 3 \
+  -a "#project:kestrel" \
+  --anchor-mode boost \
+  --include-embeddings
 ```
 
 ### 4. Working Deliberation (`deliberate`)
@@ -162,6 +165,7 @@ sekha-cluster-tool consolidate \
   --goal "Mitigate hardware fault" \
   --outcome "success" \
   --session-id "sess-101" \
+  -a "#project:kestrel" \
   --sync
 ```
 
@@ -172,6 +176,7 @@ Coordinates the entire 4-stage loop in a single command, collecting stage teleme
 sekha-cluster-tool orchestrate \
   --input "syslog telemetry stream" \
   --directive "Investigate and resolve alert" \
+  -a "#project:kestrel" \
   --sync
 ```
 
