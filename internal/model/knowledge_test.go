@@ -298,3 +298,172 @@ func TestRecallResponse_ConstructedInMemory(t *testing.T) {
 		t.Errorf("expected nil embedding to be omitted, got: %s", outStr)
 	}
 }
+
+func TestRecallResponse_FormatMarkdown(t *testing.T) {
+	t.Run("empty nodes", func(t *testing.T) {
+		resp := RecallResponse{
+			Nodes:          []ScoredNode{},
+			QueryLatencyMS: 0.5,
+		}
+		got := resp.FormatMarkdown()
+		expected := "No associative nodes matched the query."
+		if got != expected {
+			t.Errorf("expected '%s', got '%s'", expected, got)
+		}
+		if resp.FormatConcise() != expected {
+			t.Errorf("FormatConcise should match FormatMarkdown")
+		}
+	})
+
+	t.Run("nil response", func(t *testing.T) {
+		var resp *RecallResponse
+		got := resp.FormatMarkdown()
+		expected := "No associative nodes matched the query."
+		if got != expected {
+			t.Errorf("expected '%s', got '%s'", expected, got)
+		}
+	})
+
+	t.Run("nodes with anchors and edges", func(t *testing.T) {
+		resp := RecallResponse{
+			Nodes: []ScoredNode{
+				{
+					Node: Node{
+						ID:         "node-001",
+						Label:      "Kernel Panic Mitigation",
+						EntityType: "policy",
+						Summary:    "Threshold 70C triggers auxiliary fan override and emergency thermal throttling.",
+						Anchors:    []string{"#project:kestrel", "#hardware:thermal"},
+					},
+					Score:    0.95,
+					SimScore: 0.85,
+				},
+				{
+					Node: Node{
+						ID:         "node-002",
+						Label:      "Fan Controller Override",
+						EntityType: "device",
+						Summary:    "Hardware PWM fan controller interface for secondary cooling.",
+						Anchors:    []string{"#hardware:thermal"},
+					},
+					Score:    0.88,
+					SimScore: 0.78,
+				},
+				{
+					Node: Node{
+						ID:         "node-003",
+						Label:      "Thermal Monitoring Daemon",
+						EntityType: "service",
+						Summary:    "Background daemon polling CPU die temperatures every 100ms.",
+						Anchors:    []string{"#service:monitor"},
+					},
+					Score:    0.82,
+					SimScore: 0.72,
+				},
+				{
+					Node: Node{
+						ID:         "node-004",
+						Label:      "NVMe Write Cache Policy",
+						EntityType: "policy",
+						Summary:    "Flush write-back cache on thermal warning events to prevent data loss.",
+						Anchors:    nil,
+					},
+					Score:    0.75,
+					SimScore: 0.65,
+				},
+				{
+					Node: Node{
+						ID:         "node-005",
+						Label:      "Alert Dispatch Handler",
+						EntityType: "event",
+						Summary:    "Routes critical alerts to telemetry channel.",
+						Anchors:    []string{},
+					},
+					Score:    0.70,
+					SimScore: 0.60,
+				},
+			},
+			Edges: []Edge{
+				{
+					SourceID:     "node-001",
+					TargetID:     "node-002",
+					RelationType: "governs",
+					Weight:       0.90,
+				},
+				{
+					SourceID:     "node-001",
+					TargetID:     "node-004",
+					RelationType: "triggers",
+					Weight:       0.75,
+				},
+			},
+			QueryLatencyMS: 1.25,
+		}
+
+		out := resp.FormatMarkdown()
+
+		// Verify header
+		if !strings.Contains(out, "# Recall Results (5 nodes, 1.25ms)") {
+			t.Errorf("missing expected header in output:\n%s", out)
+		}
+
+		// Verify nodes
+		expectedNode1 := "- [node-001] **Kernel Panic Mitigation** (`policy`, score: 0.95, sim: 0.85)\n  Summary: Threshold 70C triggers auxiliary fan override and emergency thermal throttling.\n  Anchors: #project:kestrel, #hardware:thermal"
+		if !strings.Contains(out, expectedNode1) {
+			t.Errorf("missing node-001 in output:\n%s", out)
+		}
+
+		expectedNode4 := "- [node-004] **NVMe Write Cache Policy** (`policy`, score: 0.75, sim: 0.65)\n  Summary: Flush write-back cache on thermal warning events to prevent data loss.\n  Anchors: none"
+		if !strings.Contains(out, expectedNode4) {
+			t.Errorf("missing node-004 (anchors: none) in output:\n%s", out)
+		}
+
+		// Verify relational subgraph
+		if !strings.Contains(out, "## Relational Subgraph (2 edges)") {
+			t.Errorf("missing relational subgraph header in output:\n%s", out)
+		}
+		expectedEdge1 := "- `node-001` --(governs, weight: 0.90)--> `node-002`"
+		if !strings.Contains(out, expectedEdge1) {
+			t.Errorf("missing edge-1 in output:\n%s", out)
+		}
+		expectedEdge2 := "- `node-001` --(triggers, weight: 0.75)--> `node-004`"
+		if !strings.Contains(out, expectedEdge2) {
+			t.Errorf("missing edge-2 in output:\n%s", out)
+		}
+
+		// Verify compactness (< 1.5 KB)
+		if len(out) >= 1536 {
+			t.Errorf("expected compact output (< 1.5 KB), got %d bytes", len(out))
+		}
+
+		// FormatConcise should match
+		if resp.FormatConcise() != out {
+			t.Errorf("FormatConcise output does not match FormatMarkdown")
+		}
+	})
+
+	t.Run("nodes without edges", func(t *testing.T) {
+		resp := RecallResponse{
+			Nodes: []ScoredNode{
+				{
+					Node: Node{
+						ID:         "node-001",
+						Label:      "Solo Node",
+						EntityType: "concept",
+						Summary:    "A node with no relational edges.",
+					},
+					Score:    0.90,
+					SimScore: 0.80,
+				},
+			},
+			Edges:          []Edge{},
+			QueryLatencyMS: 0.85,
+		}
+
+		out := resp.FormatMarkdown()
+		if strings.Contains(out, "Relational Subgraph") {
+			t.Errorf("expected no relational subgraph header when edges slice is empty, got:\n%s", out)
+		}
+	})
+}
+

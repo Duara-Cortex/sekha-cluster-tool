@@ -2,6 +2,7 @@ package model
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -156,6 +157,47 @@ func (r RecallResponse) MarshalJSON() ([]byte, error) {
 		Edges:          edges,
 		QueryLatencyMS: r.QueryLatencyMS,
 	})
+}
+
+// FormatMarkdown renders a clean, token-efficient Markdown view of the recall results.
+func (r *RecallResponse) FormatMarkdown() string {
+	if r == nil || len(r.Nodes) == 0 {
+		return "No associative nodes matched the query."
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("# Recall Results (%d nodes, %.2fms)\n", len(r.Nodes), r.QueryLatencyMS))
+
+	for _, node := range r.Nodes {
+		sb.WriteString(fmt.Sprintf("- [%s] **%s** (`%s`, score: %.2f, sim: %.2f)\n",
+			node.ID, node.Label, node.EntityType, node.Score, node.SimScore))
+		sb.WriteString(fmt.Sprintf("  Summary: %s\n", node.Summary))
+		if len(node.Anchors) > 0 {
+			sb.WriteString(fmt.Sprintf("  Anchors: %s\n", strings.Join(node.Anchors, ", ")))
+		} else {
+			sb.WriteString("  Anchors: none\n")
+		}
+	}
+
+	if len(r.Edges) > 0 {
+		sb.WriteString(fmt.Sprintf("\n## Relational Subgraph (%d edges)\n", len(r.Edges)))
+		for _, edge := range r.Edges {
+			sb.WriteString(fmt.Sprintf("- `%s` --(%s, weight: %.2f)--> `%s`\n",
+				edge.SourceID, edge.RelationType, edge.Weight, edge.TargetID))
+		}
+	}
+
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+// FormatConcise is an alias of FormatMarkdown for concise output formatting.
+func (r *RecallResponse) FormatConcise() string {
+	return r.FormatMarkdown()
+}
+
+// RenderMarkdown is an alias of FormatMarkdown.
+func (r *RecallResponse) RenderMarkdown() string {
+	return r.FormatMarkdown()
 }
 
 // KnowledgeHealthResponse reports Node 1 operational status and graph sizing.
