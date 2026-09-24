@@ -244,13 +244,22 @@ func (r *RecallResponse) Filter(entityType string, minScore float64) {
 	}
 }
 
+// EmbeddingEngineHealth reports status of the local embedding model server.
+type EmbeddingEngineHealth struct {
+	Enabled   bool   `json:"enabled"`
+	Status    string `json:"status"`
+	URL       string `json:"url,omitempty"`
+	Dimension int    `json:"dimension,omitempty"`
+}
+
 // KnowledgeHealthResponse reports Node 1 operational status and graph sizing.
 type KnowledgeHealthResponse struct {
-	Status        string `json:"status"`
-	Node          string `json:"node"`
-	Port          int    `json:"port"`
-	Service       string `json:"service"`
-	UptimeSeconds int64  `json:"uptime_seconds"`
-	NodeCount     int64  `json:"node_count"`
-	EdgeCount     int64  `json:"edge_count"`
+	Status          string                 `json:"status"`
+	Node            string                 `json:"node"`
+	Port            int                    `json:"port"`
+	Service         string                 `json:"service"`
+	UptimeSeconds   int64                  `json:"uptime_seconds"`
+	NodeCount       int64                  `json:"node_count"`
+	EdgeCount       int64                  `json:"edge_count"`
+	EmbeddingEngine *EmbeddingEngineHealth `json:"embedding_engine,omitempty"`
 }

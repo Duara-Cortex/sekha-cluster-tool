@@ -40,6 +40,7 @@ type GlobalFlags struct {
 	Format            string
 	EntityType        string
 	MinScore          float64
+	JSON              bool
 }
 
 // anchorSliceFlag enables repeatable and comma-delimited string flags.
@@ -134,6 +135,12 @@ func parseArgs(rawArgs []string) (GlobalFlags, string, []string) {
 
 		if m, val, _ := matchBoolFlag(arg, "verbose"); m {
 			global.Verbose = val
+			i++
+			continue
+		}
+
+		if m, val, _ := matchBoolFlag(arg, "json"); m {
+			global.JSON = val
 			i++
 			continue
 		}
@@ -363,6 +370,8 @@ func main() {
 		runOrchestrate(global, args)
 	case "status", "health":
 		runStatus(global, args)
+	case "ping":
+		os.Exit(runPing(global, args))
 	case "env", "config":
 		runEnv(global, args)
 	case "version", "--version", "-v":
@@ -396,6 +405,7 @@ Subcommands:
   consolidate   Commit resolved episodic deliberation traces to consolidation layer (:8084)
   orchestrate   Execute the full 4-stage closed-loop cognitive turn (Sensory -> Recall -> Deliberate -> Consolidate)
   status        Check operational health and ping latency across cluster endpoints
+  ping          Preflight connectivity check across cluster endpoints (exit 0/1)
   env           Manage and inspect cluster environment configuration (init, show)
   version       Display tool version and build information
 
@@ -413,8 +423,9 @@ Global Flags:
   --type, -t <type>          Filter recall results by entity type
   --min-score <score>        Minimum recall candidate score threshold (default: 0.0)
   --verbose                  Enable diagnostic step logs on stderr (stdout remains clean JSON)
+  --json                     Output result in structured JSON format (for status, ping)
   --trace-id <id>            Specify or propagate an explicit X-Trace-ID
-  --timeout <duration>       Operation or probe timeout budget (e.g. 1500ms, 2s)
+  --timeout <duration>       Operation or probe timeout budget (e.g. 500ms, 2s)
 
 Environment Variables (.env / OS):
   CLUSTER_ENV_FILE       Path to custom .env configuration file
@@ -1138,8 +1149,9 @@ func runOrchestrate(global GlobalFlags, args []string) {
 }
 
 // runStatus queries and aggregates operational health across configured cluster endpoints.
-func runStatus(global GlobalFlags, args []string) {
+func runStatus(global GlobalFlags, args []string) int {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	setDoubleDashUsage(fs)
 	sensoryURLFlag := fs.String("sensory-url", "", "Sensory filter endpoint URL")
 	workingURLFlag := fs.String("working-url", "", "Working memory scratchpad endpoint URL")
 	knowledgeURLFlag := fs.String("knowledge-url", "", "Knowledge store endpoint URL")
@@ -1149,9 +1161,16 @@ func runStatus(global GlobalFlags, args []string) {
 	node1URLFlag := fs.String("node1-url", "", "Legacy alias for --knowledge-url")
 	orchestrationURLFlag := fs.String("orchestration-url", "", "Alias for working memory URL")
 	envFileFlag := fs.String("env-file", "", "Path to .env configuration file")
-	timeoutFlag := fs.Duration("timeout", 1500*time.Millisecond, "Probe timeout per node")
 	traceIDFlag := fs.String("trace-id", "", "Distributed trace ID")
 	verboseFlag := fs.Bool("verbose", false, "Enable stderr diagnostic logs")
+	jsonFlag := fs.Bool("json", false, "Emit cluster status as structured JSON")
+	formatFlag := fs.String("format", "", "Output format: text or json")
+
+	timeout := 500 * time.Millisecond
+	if global.Timeout > 0 {
+		timeout = global.Timeout
+	}
+	fs.DurationVar(&timeout, "timeout", timeout, "Probe timeout per node (default: 500ms)")
 	_ = fs.Parse(args)
 
 	verbose := global.Verbose || *verboseFlag
@@ -1159,11 +1178,6 @@ func runStatus(global GlobalFlags, args []string) {
 	traceID := pickURL(*traceIDFlag, global.TraceID)
 	if traceID == "" {
 		traceID = telemetry.GenerateTraceID()
-	}
-
-	timeout := *timeoutFlag
-	if global.Timeout > 0 {
-		timeout = global.Timeout
 	}
 
 	cfg, err := config.Load(config.FlagOverrides{
@@ -1179,147 +1193,73 @@ func runStatus(global GlobalFlags, args []string) {
 		outputError(traceID, err.Error())
 	}
 
-	type NodeStatus struct {
-		Name     string      `json:"name"`
-		Role     string      `json:"role"`
-		URL      string      `json:"url"`
-		Status   string      `json:"status"`
-		Duration float64     `json:"ping_ms"`
-		Details  interface{} `json:"details,omitempty"`
-		Error    string      `json:"error,omitempty"`
-	}
+	probeResult := client.ProbeClusterHealth(context.Background(), *cfg, timeout, traceID)
 
-	results := make([]NodeStatus, 3)
-
-	// 1. Probe Sensory Layer
-	if cfg.SensoryURL == "" {
-		results[0] = NodeStatus{
-			Name:   "Sensory Layer",
-			Role:   "Sensory Buffer & Attention Filter",
-			URL:    "(not configured)",
-			Status: "unconfigured",
-			Error:  "Endpoint address not set in .env, environment, flags, or build",
-		}
+	isJSON := *jsonFlag || global.JSON || strings.EqualFold(*formatFlag, "json") || strings.EqualFold(global.Format, "json")
+	if isJSON {
+		outputJSON(probeResult.ToStatusJSON())
 	} else {
-		sClient := client.NewSensoryClient(cfg.SensoryURL, timeout)
-		t0 := time.Now()
-		ctx3, cancel3 := context.WithTimeout(context.Background(), timeout)
-		sStats, err := sClient.GetStats(ctx3, traceID)
-		cancel3()
-		d3 := float64(time.Since(t0).Microseconds()) / 1000.0
-		if err != nil {
-			results[0] = NodeStatus{
-				Name:     "Sensory Layer",
-				Role:     "Sensory Buffer & Attention Filter",
-				URL:      cfg.SensoryURL,
-				Status:   "unreachable",
-				Duration: d3,
-				Error:    err.Error(),
-			}
-		} else {
-			results[0] = NodeStatus{
-				Name:     "Sensory Layer",
-				Role:     "Sensory Buffer & Attention Filter",
-				URL:      cfg.SensoryURL,
-				Status:   "healthy",
-				Duration: d3,
-				Details:  sStats,
-			}
-		}
+		fmt.Print(probeResult.FormatDashboard())
+	}
+	return 0
+}
+
+// runPing performs a lightweight preflight connectivity probe across all cluster nodes.
+func runPing(global GlobalFlags, args []string) int {
+	fs := flag.NewFlagSet("ping", flag.ExitOnError)
+	setDoubleDashUsage(fs)
+	sensoryURLFlag := fs.String("sensory-url", "", "Sensory filter endpoint URL")
+	workingURLFlag := fs.String("working-url", "", "Working memory scratchpad endpoint URL")
+	knowledgeURLFlag := fs.String("knowledge-url", "", "Knowledge store endpoint URL")
+	apiKeyFlag := fs.String("api-key", "", "API key for Node 1 authentication")
+	node3URLFlag := fs.String("node3-url", "", "Legacy alias for --sensory-url")
+	node2URLFlag := fs.String("node2-url", "", "Legacy alias for --working-url")
+	node1URLFlag := fs.String("node1-url", "", "Legacy alias for --knowledge-url")
+	orchestrationURLFlag := fs.String("orchestration-url", "", "Alias for working memory URL")
+	envFileFlag := fs.String("env-file", "", "Path to .env configuration file")
+	traceIDFlag := fs.String("trace-id", "", "Distributed trace ID")
+	verboseFlag := fs.Bool("verbose", false, "Enable stderr diagnostic logs")
+	jsonFlag := fs.Bool("json", false, "Emit connectivity status as structured JSON")
+	formatFlag := fs.String("format", "", "Output format: text or json")
+
+	timeout := 500 * time.Millisecond
+	if global.Timeout > 0 {
+		timeout = global.Timeout
+	}
+	fs.DurationVar(&timeout, "timeout", timeout, "Probe timeout per node (default: 500ms)")
+	_ = fs.Parse(args)
+
+	verbose := global.Verbose || *verboseFlag
+	telemetry.SetVerbose(verbose)
+	traceID := pickURL(*traceIDFlag, global.TraceID)
+	if traceID == "" {
+		traceID = telemetry.GenerateTraceID()
 	}
 
-	// 2. Probe Working Memory Layer
-	if cfg.WorkingURL == "" {
-		results[1] = NodeStatus{
-			Name:   "Working Memory Layer",
-			Role:   "Working Memory & Inference Engine",
-			URL:    "(not configured)",
-			Status: "unconfigured",
-			Error:  "Endpoint address not set in .env, environment, flags, or build",
-		}
-	} else {
-		wClient := client.NewWorkingClient(cfg.WorkingURL, timeout)
-		t1 := time.Now()
-		ctx2, cancel2 := context.WithTimeout(context.Background(), timeout)
-		wHealth, err := wClient.GetHealth(ctx2, traceID)
-		cancel2()
-		d2 := float64(time.Since(t1).Microseconds()) / 1000.0
-		if err != nil {
-			results[1] = NodeStatus{
-				Name:     "Working Memory Layer",
-				Role:     "Working Memory & Inference Engine",
-				URL:      cfg.WorkingURL,
-				Status:   "unreachable",
-				Duration: d2,
-				Error:    err.Error(),
-			}
-		} else {
-			results[1] = NodeStatus{
-				Name:     "Working Memory Layer",
-				Role:     "Working Memory & Inference Engine",
-				URL:      cfg.WorkingURL,
-				Status:   "healthy",
-				Duration: d2,
-				Details:  wHealth,
-			}
-		}
-	}
-
-	// 3. Probe Knowledge Layer
-	if cfg.KnowledgeURL == "" {
-		results[2] = NodeStatus{
-			Name:   "Knowledge Layer",
-			Role:   "Knowledge Graph & Consolidation Store",
-			URL:    "(not configured)",
-			Status: "unconfigured",
-			Error:  "Endpoint address not set in .env, environment, flags, or build",
-		}
-	} else {
-		kClient := client.NewKnowledgeClient(cfg.KnowledgeURL, timeout, cfg.APIKey)
-		t2 := time.Now()
-		ctx1, cancel1 := context.WithTimeout(context.Background(), timeout)
-		kHealth, err := kClient.GetHealth(ctx1, traceID)
-		cancel1()
-		d1 := float64(time.Since(t2).Microseconds()) / 1000.0
-		if err != nil {
-			results[2] = NodeStatus{
-				Name:     "Knowledge Layer",
-				Role:     "Knowledge Graph & Consolidation Store",
-				URL:      cfg.KnowledgeURL,
-				Status:   "unreachable",
-				Duration: d1,
-				Error:    err.Error(),
-			}
-		} else {
-			results[2] = NodeStatus{
-				Name:     "Knowledge Layer",
-				Role:     "Knowledge Graph & Consolidation Store",
-				URL:      cfg.KnowledgeURL,
-				Status:   "healthy",
-				Duration: d1,
-				Details:  kHealth,
-			}
-		}
-	}
-
-	clusterHealthy := true
-	for _, r := range results {
-		if r.Status != "healthy" {
-			clusterHealthy = false
-			break
-		}
-	}
-
-	overallStatus := "all_nodes_healthy"
-	if !clusterHealthy {
-		overallStatus = "degraded_or_partially_offline"
-	}
-
-	outputJSON(map[string]interface{}{
-		"cluster_status":   overallStatus,
-		"env_file_loaded":  cfg.EnvFileLoaded,
-		"trace_id":         traceID,
-		"timestamp":        time.Now().UTC().Format(time.RFC3339),
-		"nodes":            results,
+	cfg, err := config.Load(config.FlagOverrides{
+		EnvPath:          pickURL(*envFileFlag, global.EnvPath),
+		SensoryURL:       pickURL(*sensoryURLFlag, *node3URLFlag, global.SensoryURL),
+		WorkingURL:       pickURL(*workingURLFlag, *node2URLFlag, *orchestrationURLFlag, global.WorkingURL, global.OrchestrationURL),
+		KnowledgeURL:     pickURL(*knowledgeURLFlag, *node1URLFlag, global.KnowledgeURL),
+		OrchestrationURL: pickURL(*orchestrationURLFlag, global.OrchestrationURL),
+		APIKey:           pickURL(*apiKeyFlag, global.APIKey),
+		Timeout:          timeout,
 	})
+	if err != nil {
+		outputError(traceID, err.Error())
+	}
+
+	probeResult := client.ProbeClusterHealth(context.Background(), *cfg, timeout, traceID)
+
+	isJSON := *jsonFlag || global.JSON || strings.EqualFold(*formatFlag, "json") || strings.EqualFold(global.Format, "json")
+	if isJSON {
+		outputJSON(probeResult.ToPingJSON())
+	} else {
+		fmt.Print(probeResult.FormatPing())
+	}
+
+	if probeResult.AllHealthy {
+		return 0
+	}
+	return 1
 }

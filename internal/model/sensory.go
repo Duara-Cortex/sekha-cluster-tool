@@ -52,6 +52,9 @@ type SensoryStatsResponse struct {
 	UptimeSeconds       int64                `json:"uptime_seconds"`
 	FillPercent         float64              `json:"fill_percent,omitempty"`
 	CurrentItemCount    int64                `json:"current_item_count,omitempty"`
+	CapacityBytes       int64                `json:"capacity_bytes,omitempty"`
+	UsedBytes           int64                `json:"used_bytes,omitempty"`
+	TotalIngestedCount  int64                `json:"total_ingested_count,omitempty"`
 	ClassifierTelemetry *ClassifierTelemetry `json:"classifier_telemetry,omitempty"`
 }
 

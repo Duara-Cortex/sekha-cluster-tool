@@ -32,6 +32,7 @@ func TestParseArgs_FlagPositions(t *testing.T) {
 		expectedFormat            string
 		expectedEntityType        string
 		expectedMinScore          float64
+		expectedJSON              bool
 		expectedArgs              []string
 	}{
 		{
@@ -209,6 +210,20 @@ func TestParseArgs_FlagPositions(t *testing.T) {
 			expectedSubcommand: "orchestrate",
 			expectedArgs:       []string{"--input", "syslog alert", "--task", "Mitigate high temp", "--sync"},
 		},
+		{
+			name:               "json flag before status subcommand",
+			args:               []string{"--json", "status"},
+			expectedSubcommand: "status",
+			expectedJSON:       true,
+			expectedArgs:       []string{},
+		},
+		{
+			name:               "json flag after ping subcommand",
+			args:               []string{"ping", "--json"},
+			expectedSubcommand: "ping",
+			expectedJSON:       true,
+			expectedArgs:       []string{},
+		},
 	}
 
 	for _, tt := range tests {
@@ -259,6 +274,9 @@ func TestParseArgs_FlagPositions(t *testing.T) {
 			}
 			if global.MinScore != tt.expectedMinScore {
 				t.Errorf("expected MinScore %f, got %f", tt.expectedMinScore, global.MinScore)
+			}
+			if global.JSON != tt.expectedJSON {
+				t.Errorf("expected JSON %v, got %v", tt.expectedJSON, global.JSON)
 			}
 			if len(remaining) != len(tt.expectedArgs) {
 				t.Fatalf("expected remaining args length %d, got %d (%v)", len(tt.expectedArgs), len(remaining), remaining)
@@ -948,5 +966,350 @@ func TestRunOrchestrate_TaskFlagAlias(t *testing.T) {
 		}
 	})
 }
+
+func setupMockCluster(sensoryHandler, workingHandler, knowledgeHandler http.HandlerFunc) (mockSensory, mockWorking, mockKnowledge *httptest.Server, global GlobalFlags) {
+	if sensoryHandler != nil {
+		mockSensory = httptest.NewServer(sensoryHandler)
+	}
+	if workingHandler != nil {
+		mockWorking = httptest.NewServer(workingHandler)
+	}
+	if knowledgeHandler != nil {
+		mockKnowledge = httptest.NewServer(knowledgeHandler)
+	}
+
+	global = GlobalFlags{}
+	if mockSensory != nil {
+		global.SensoryURL = mockSensory.URL
+	}
+	if mockWorking != nil {
+		global.WorkingURL = mockWorking.URL
+	}
+	if mockKnowledge != nil {
+		global.KnowledgeURL = mockKnowledge.URL
+	}
+	return
+}
+
+func defaultHealthySensoryHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(model.SensoryStatsResponse{
+			Status:           "healthy",
+			BufferCapacityMB: 64.0,
+			BufferUsageMB:    10.3,
+			FillPercent:      16.2,
+			TotalIngested:    50386,
+			DroppedPackets:   0,
+			ClassifierTelemetry: &model.ClassifierTelemetry{
+				TotalEvaluated:      30836,
+				TotalSalient:        30503,
+				NoiseReductionRatio: 0.011,
+			},
+		})
+	}
+}
+
+func defaultHealthyWorkingHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(model.WorkingHealthResponse{
+			Status:         "healthy",
+			LlamaInference: "reachable",
+			Service:        "sekha-working-scratchpad",
+			UptimeSeconds:  396000,
+		})
+	}
+}
+
+func defaultHealthyKnowledgeHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(model.KnowledgeHealthResponse{
+			Status:        "healthy",
+			NodeCount:     229,
+			EdgeCount:     882,
+			Service:       "sekha-knowledge-store",
+			UptimeSeconds: 93600,
+			EmbeddingEngine: &model.EmbeddingEngineHealth{
+				Enabled:   true,
+				Status:    "reachable",
+				URL:       "http://localhost:8086",
+				Dimension: 384,
+			},
+		})
+	}
+}
+
+func TestRunStatus_DashboardOutput(t *testing.T) {
+	s, w, k, global := setupMockCluster(
+		defaultHealthySensoryHandler(),
+		defaultHealthyWorkingHandler(),
+		defaultHealthyKnowledgeHandler(),
+	)
+	defer s.Close()
+	defer w.Close()
+	defer k.Close()
+
+	var out string
+	out = captureStdout(func() {
+		code := runStatus(global, []string{})
+		if code != 0 {
+			t.Errorf("expected exit code 0, got %d", code)
+		}
+	})
+
+	expectedSubstrings := []string{
+		"Sekha Tri-Node Edge Cognitive Cluster Status",
+		"Cluster State: ALL NODES HEALTHY (3/3 Online)",
+		"[●] Node 3: Sensory Layer",
+		"Status:       HEALTHY",
+		"Buffer Usage: 10.3 MB / 64.0 MB (16.2% fill)",
+		"Throughput:   50,386 ingested | 0 dropped",
+		"Gating:       30,503 salient / 30,836 evaluated (1.1% noise reduced)",
+		"[●] Node 2: Working Memory Layer",
+		"SLM Engine:   REACHABLE (llama-server :8082)",
+		"Service:      sekha-working-scratchpad (uptime: 4d 14h)",
+		"[●] Node 1: Long-Term Knowledge Layer",
+		"Graph Scale:  229 nodes | 882 relational edges",
+		"Embedder:     REACHABLE (384-D :8086)",
+		"Service:      sekha-knowledge-store (uptime: 1d 02h)",
+	}
+
+	for _, sub := range expectedSubstrings {
+		if !strings.Contains(out, sub) {
+			t.Errorf("expected dashboard to contain '%s', got:\n%s", sub, out)
+		}
+	}
+}
+
+func TestRunStatus_JSONOutput(t *testing.T) {
+	s, w, k, global := setupMockCluster(
+		defaultHealthySensoryHandler(),
+		defaultHealthyWorkingHandler(),
+		defaultHealthyKnowledgeHandler(),
+	)
+	defer s.Close()
+	defer w.Close()
+	defer k.Close()
+
+	out := captureStdout(func() {
+		code := runStatus(global, []string{"--json"})
+		if code != 0 {
+			t.Errorf("expected exit code 0, got %d", code)
+		}
+	})
+
+	var res map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("failed to decode JSON output: %v, raw:\n%s", err, out)
+	}
+
+	if res["cluster_status"] != "all_nodes_healthy" {
+		t.Errorf("expected cluster_status 'all_nodes_healthy', got '%v'", res["cluster_status"])
+	}
+
+	nodes, ok := res["nodes"].([]interface{})
+	if !ok || len(nodes) != 3 {
+		t.Fatalf("expected 3 nodes in json, got %d", len(nodes))
+	}
+}
+
+func TestRunStatus_OfflineResilience(t *testing.T) {
+	s, w, k, global := setupMockCluster(
+		defaultHealthySensoryHandler(),
+		defaultHealthyWorkingHandler(),
+		defaultHealthyKnowledgeHandler(),
+	)
+	defer w.Close()
+	defer k.Close()
+	// Close sensory node immediately to simulate failure
+	s.Close()
+
+	out := captureStdout(func() {
+		code := runStatus(global, []string{})
+		if code != 0 {
+			t.Errorf("expected exit code 0 even when degraded, got %d", code)
+		}
+	})
+
+	if !strings.Contains(out, "Cluster State: DEGRADED (2/3 Online)") {
+		t.Errorf("expected degraded cluster state, got:\n%s", out)
+	}
+	if !strings.Contains(out, "[✗] Node 3: Sensory Layer") {
+		t.Errorf("expected sensory node marked offline, got:\n%s", out)
+	}
+	if !strings.Contains(out, "OFFLINE") {
+		t.Errorf("expected OFFLINE indicator, got:\n%s", out)
+	}
+}
+
+func TestRunPing_HealthyOutput(t *testing.T) {
+	s, w, k, global := setupMockCluster(
+		defaultHealthySensoryHandler(),
+		defaultHealthyWorkingHandler(),
+		defaultHealthyKnowledgeHandler(),
+	)
+	defer s.Close()
+	defer w.Close()
+	defer k.Close()
+
+	var code int
+	out := captureStdout(func() {
+		code = runPing(global, []string{})
+	})
+
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d", code)
+	}
+
+	expectedLines := []string{
+		"[OK] Node 3 (Sensory)",
+		"[OK] Node 2 (Working)",
+		"[OK] Node 1 (Knowledge)",
+		"Cluster: HEALTHY (3/3 nodes online)",
+	}
+
+	for _, line := range expectedLines {
+		if !strings.Contains(out, line) {
+			t.Errorf("expected ping output to contain '%s', got:\n%s", line, out)
+		}
+	}
+}
+
+func TestRunPing_JSONOutput(t *testing.T) {
+	s, w, k, global := setupMockCluster(
+		defaultHealthySensoryHandler(),
+		defaultHealthyWorkingHandler(),
+		defaultHealthyKnowledgeHandler(),
+	)
+	defer s.Close()
+	defer w.Close()
+	defer k.Close()
+
+	var code int
+	out := captureStdout(func() {
+		code = runPing(global, []string{"--json"})
+	})
+
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d", code)
+	}
+
+	var res struct {
+		AllHealthy bool `json:"all_healthy"`
+		Nodes      map[string]struct {
+			Reachable bool    `json:"reachable"`
+			PingMS    float64 `json:"ping_ms"`
+			URL       string  `json:"url"`
+		} `json:"nodes"`
+		Timestamp string `json:"timestamp"`
+	}
+
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("failed to decode ping JSON output: %v, raw:\n%s", err, out)
+	}
+
+	if !res.AllHealthy {
+		t.Errorf("expected AllHealthy true, got false")
+	}
+	if !res.Nodes["sensory"].Reachable || !res.Nodes["working"].Reachable || !res.Nodes["knowledge"].Reachable {
+		t.Errorf("expected all 3 nodes reachable, got %+v", res.Nodes)
+	}
+}
+
+func TestRunPing_OfflineResilience(t *testing.T) {
+	s, w, k, global := setupMockCluster(
+		defaultHealthySensoryHandler(),
+		defaultHealthyWorkingHandler(),
+		defaultHealthyKnowledgeHandler(),
+	)
+	defer s.Close()
+	defer k.Close()
+	// Close working node to simulate failure
+	w.Close()
+
+	var code int
+	out := captureStdout(func() {
+		code = runPing(global, []string{})
+	})
+
+	if code != 1 {
+		t.Errorf("expected exit code 1 for degraded cluster, got %d", code)
+	}
+
+	if !strings.Contains(out, "[FAIL] Node 2 (Working)") {
+		t.Errorf("expected [FAIL] for Node 2, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Cluster: DEGRADED (2/3 nodes online)") {
+		t.Errorf("expected degraded summary, got:\n%s", out)
+	}
+
+	// Also test JSON output under offline condition
+	var jsonCode int
+	jsonOut := captureStdout(func() {
+		jsonCode = runPing(global, []string{"--json"})
+	})
+
+	if jsonCode != 1 {
+		t.Errorf("expected exit code 1 for degraded cluster in JSON mode, got %d", jsonCode)
+	}
+
+	var res struct {
+		AllHealthy bool `json:"all_healthy"`
+		Nodes      map[string]struct {
+			Reachable bool `json:"reachable"`
+		} `json:"nodes"`
+	}
+	if err := json.Unmarshal([]byte(jsonOut), &res); err != nil {
+		t.Fatalf("failed to decode ping JSON output: %v", err)
+	}
+	if res.AllHealthy {
+		t.Errorf("expected AllHealthy to be false")
+	}
+	if res.Nodes["working"].Reachable {
+		t.Errorf("expected working node to be unreachable")
+	}
+	if !res.Nodes["sensory"].Reachable || !res.Nodes["knowledge"].Reachable {
+		t.Errorf("expected sensory and knowledge to remain reachable")
+	}
+}
+
+func TestRunPing_ConcurrentExecution(t *testing.T) {
+	slowSensory := func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		defaultHealthySensoryHandler()(w, r)
+	}
+	slowWorking := func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		defaultHealthyWorkingHandler()(w, r)
+	}
+	slowKnowledge := func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		defaultHealthyKnowledgeHandler()(w, r)
+	}
+
+	s, w, k, global := setupMockCluster(slowSensory, slowWorking, slowKnowledge)
+	defer s.Close()
+	defer w.Close()
+	defer k.Close()
+
+	start := time.Now()
+	var code int
+	captureStdout(func() {
+		code = runPing(global, []string{})
+	})
+	elapsed := time.Since(start)
+
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d", code)
+	}
+
+	// 3 servers sleeping 200ms must run in parallel and take < 450ms, not sequential 600ms
+	if elapsed > 450*time.Millisecond {
+		t.Errorf("expected parallel execution (< 450ms), took %v", elapsed)
+	}
+}
+
 
 
