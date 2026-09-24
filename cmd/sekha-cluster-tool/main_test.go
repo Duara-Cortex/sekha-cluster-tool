@@ -4,6 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -191,6 +195,19 @@ func TestParseArgs_FlagPositions(t *testing.T) {
 			expectedMinScore:   0.65,
 			expectedFormat:     "concise",
 			expectedArgs:       []string{"--query", "ingest port"},
+		},
+		{
+			name:               "positional consolidation arguments with anchor and sync",
+			args:               []string{"consolidate", "Project Kestrel", "INGEST_PORT: 51742; AUTH_HEADER: X-Kestrel-Key", "-a", "#project:kestrel", "--sync"},
+			expectedSubcommand: "consolidate",
+			expectedAnchors:    []string{"#project:kestrel"},
+			expectedArgs:       []string{"Project Kestrel", "INGEST_PORT: 51742; AUTH_HEADER: X-Kestrel-Key", "--sync"},
+		},
+		{
+			name:               "orchestrate with task flag",
+			args:               []string{"orchestrate", "--input", "syslog alert", "--task", "Mitigate high temp", "--sync"},
+			expectedSubcommand: "orchestrate",
+			expectedArgs:       []string{"--input", "syslog alert", "--task", "Mitigate high temp", "--sync"},
 		},
 	}
 
@@ -604,4 +621,332 @@ func TestRecall_EntityFilteringAndPruning(t *testing.T) {
 		}
 	})
 }
+
+func captureStdout(f func()) string {
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	done := make(chan string)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		done <- buf.String()
+	}()
+
+	f()
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+	out := <-done
+	return out
+}
+
+func TestRunConsolidate_PositionalShortcut(t *testing.T) {
+	var capturedReq model.ConsolidateRequest
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("failed to read body: %v", err)
+		}
+		if err := json.Unmarshal(body, &capturedReq); err != nil {
+			t.Errorf("failed to unmarshal request body: %v", err)
+		}
+
+		resp := model.ConsolidateResponse{
+			Status:            "success",
+			TraceID:           r.Header.Get("X-Trace-ID"),
+			Message:           "Trace enqueued",
+			Synchronous:       capturedReq.Synchronous,
+			EntitiesExtracted: 1,
+			NodesFused:        1,
+			EdgesReinforced:   0,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer mockServer.Close()
+
+	global := GlobalFlags{
+		KnowledgeURL: mockServer.URL,
+	}
+
+	captureStdout(func() {
+		runConsolidate(global, []string{"Project Kestrel", "PORT: 51742", "-a", "#project:kestrel", "--sync"})
+	})
+
+	if capturedReq.TaskGoal != "Store Project Kestrel configuration" {
+		t.Errorf("expected TaskGoal 'Store Project Kestrel configuration', got '%s'", capturedReq.TaskGoal)
+	}
+	if capturedReq.Outcome != "success" {
+		t.Errorf("expected Outcome 'success', got '%s'", capturedReq.Outcome)
+	}
+	if capturedReq.Status != "completed" {
+		t.Errorf("expected Status 'completed', got '%s'", capturedReq.Status)
+	}
+	if !strings.HasPrefix(capturedReq.SessionID, "sess-memorise-") {
+		t.Errorf("expected SessionID prefix 'sess-memorise-', got '%s'", capturedReq.SessionID)
+	}
+	if !capturedReq.Synchronous {
+		t.Errorf("expected Synchronous true, got false")
+	}
+
+	// Verify sensory_context
+	if len(capturedReq.SensoryContext) != 1 {
+		t.Fatalf("expected 1 sensory context item, got %d", len(capturedReq.SensoryContext))
+	}
+	sc := capturedReq.SensoryContext[0]
+	if sc.ID != "fact-01" {
+		t.Errorf("expected sensory ID 'fact-01', got '%s'", sc.ID)
+	}
+	expectedText := "Project Kestrel config: PORT: 51742"
+	if sc.Text != expectedText {
+		t.Errorf("expected sensory text '%s', got '%s'", expectedText, sc.Text)
+	}
+	if sc.Salience != 1.0 {
+		t.Errorf("expected salience 1.0, got %f", sc.Salience)
+	}
+	if sc.Source != "user" {
+		t.Errorf("expected source 'user', got '%s'", sc.Source)
+	}
+	if sc.Timestamp.IsZero() {
+		t.Errorf("expected non-zero sensory timestamp")
+	}
+
+	// Verify trajectory
+	if len(capturedReq.Trajectory) != 1 {
+		t.Fatalf("expected 1 trajectory step, got %d", len(capturedReq.Trajectory))
+	}
+	tr := capturedReq.Trajectory[0]
+	if tr.StepIndex != 0 {
+		t.Errorf("expected step index 0, got %d", tr.StepIndex)
+	}
+	expectedThought := "Committed Project Kestrel configuration to long-term memory"
+	if tr.Thought != expectedThought {
+		t.Errorf("expected thought '%s', got '%s'", expectedThought, tr.Thought)
+	}
+	if tr.Status != "completed" {
+		t.Errorf("expected trajectory status 'completed', got '%s'", tr.Status)
+	}
+	if tr.Timestamp.IsZero() {
+		t.Errorf("expected non-zero trajectory timestamp")
+	}
+
+	// Verify anchors
+	if len(capturedReq.Anchors) != 1 || capturedReq.Anchors[0] != "#project:kestrel" {
+		t.Errorf("expected anchors ['#project:kestrel'], got %v", capturedReq.Anchors)
+	}
+
+	// Sub-test: Summary already starting with label should be used as-is
+	captureStdout(func() {
+		runConsolidate(global, []string{"Project Kestrel", "Project Kestrel INGEST_PORT: 51742", "--sync"})
+	})
+	if len(capturedReq.SensoryContext) != 1 || capturedReq.SensoryContext[0].Text != "Project Kestrel INGEST_PORT: 51742" {
+		t.Errorf("expected summary as-is, got: %s", capturedReq.SensoryContext[0].Text)
+	}
+
+	// Sub-test: Custom --goal, --session-id, and --outcome flags
+	captureStdout(func() {
+		runConsolidate(global, []string{"Project Kestrel", "PORT: 51742", "--goal", "Custom Kestrel Goal", "--session-id", "sess-custom-99", "--outcome", "failure"})
+	})
+	if capturedReq.TaskGoal != "Custom Kestrel Goal" {
+		t.Errorf("expected TaskGoal 'Custom Kestrel Goal', got '%s'", capturedReq.TaskGoal)
+	}
+	if capturedReq.SessionID != "sess-custom-99" {
+		t.Errorf("expected SessionID 'sess-custom-99', got '%s'", capturedReq.SessionID)
+	}
+	if capturedReq.Outcome != "failure" {
+		t.Errorf("expected Outcome 'failure', got '%s'", capturedReq.Outcome)
+	}
+
+	// Sub-test: Single positional argument treated as goal
+	captureStdout(func() {
+		runConsolidate(global, []string{"Single Positional Goal"})
+	})
+	if capturedReq.TaskGoal != "Single Positional Goal" {
+		t.Errorf("expected TaskGoal 'Single Positional Goal', got '%s'", capturedReq.TaskGoal)
+	}
+}
+
+func TestRunConsolidate_TracePrecedence(t *testing.T) {
+	var capturedReq model.ConsolidateRequest
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &capturedReq)
+
+		resp := model.ConsolidateResponse{
+			Status:  "success",
+			TraceID: r.Header.Get("X-Trace-ID"),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer mockServer.Close()
+
+	global := GlobalFlags{
+		KnowledgeURL: mockServer.URL,
+	}
+
+	traceJSON := `{
+		"session_id": "sess-explicit-trace",
+		"task_goal": "Explicit Goal From Trace",
+		"outcome": "success",
+		"sensory_context": [
+			{
+				"id": "fact-explicit-99",
+				"text": "Explicit trace sensory fact",
+				"salience": 0.88
+			}
+		],
+		"trajectory": [
+			{
+				"step_index": 0,
+				"thought": "Explicit deliberation step"
+			}
+		]
+	}`
+
+	captureStdout(func() {
+		runConsolidate(global, []string{"--trace", traceJSON, "Positional Label", "Positional Summary", "-a", "#project:kestrel"})
+	})
+
+	if capturedReq.SessionID != "sess-explicit-trace" {
+		t.Errorf("expected SessionID 'sess-explicit-trace', got '%s'", capturedReq.SessionID)
+	}
+	if capturedReq.TaskGoal != "Explicit Goal From Trace" {
+		t.Errorf("expected TaskGoal 'Explicit Goal From Trace', got '%s'", capturedReq.TaskGoal)
+	}
+	if len(capturedReq.SensoryContext) != 1 || capturedReq.SensoryContext[0].ID != "fact-explicit-99" {
+		t.Errorf("expected explicit sensory context to override positional, got: %+v", capturedReq.SensoryContext)
+	}
+	if capturedReq.SensoryContext[0].Text != "Explicit trace sensory fact" {
+		t.Errorf("expected explicit sensory text, got: %s", capturedReq.SensoryContext[0].Text)
+	}
+	if len(capturedReq.Trajectory) != 1 || capturedReq.Trajectory[0].Thought != "Explicit deliberation step" {
+		t.Errorf("expected explicit trajectory to override positional, got: %+v", capturedReq.Trajectory)
+	}
+	// Anchors should still be merged
+	if len(capturedReq.Anchors) != 1 || capturedReq.Anchors[0] != "#project:kestrel" {
+		t.Errorf("expected anchor '#project:kestrel', got %v", capturedReq.Anchors)
+	}
+}
+
+func TestRunOrchestrate_TaskFlagAlias(t *testing.T) {
+	var capturedFilterTask string
+	var capturedFilterText string
+	var capturedDelibReq model.DeliberateRequest
+
+	mockSensory := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		capturedFilterTask = r.URL.Query().Get("task")
+		capturedFilterText = string(body)
+
+		resp := model.FilterResponse{
+			Chunks: []model.SensoryChunk{
+				{
+					ID:        "chk-001",
+					Text:      "Temperature alert",
+					Salience:  0.95,
+					Source:    "syslog",
+					Timestamp: time.Now(),
+				},
+			},
+			TotalChunks:   1,
+			SalientChunks: 1,
+			ReductionRate: 0.0,
+			LatencyMS:     0.5,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer mockSensory.Close()
+
+	mockKnowledge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/recall") {
+			resp := model.RecallResponse{
+				Nodes:          []model.ScoredNode{},
+				Edges:          []model.Edge{},
+				QueryLatencyMS: 0.8,
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+			return
+		}
+		resp := model.ConsolidateResponse{
+			Status:  "success",
+			TraceID: r.Header.Get("X-Trace-ID"),
+			Message: "Trace enqueued",
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer mockKnowledge.Close()
+
+	mockWorking := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &capturedDelibReq)
+
+		resp := model.DeliberateResponse{
+			Status:           "ready",
+			StepIndex:        1,
+			Thought:          "Mitigating temperature alert",
+			ProposedAction:   "FAN_SPEED_HIGH",
+			IsComplete:       true,
+			PromptTokens:     100,
+			CompletionTokens: 25,
+			TotalTokens:      125,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer mockWorking.Close()
+
+	global := GlobalFlags{
+		SensoryURL:   mockSensory.URL,
+		KnowledgeURL: mockKnowledge.URL,
+		WorkingURL:   mockWorking.URL,
+	}
+
+	t.Run("--task sets TaskDirective when --directive is empty", func(t *testing.T) {
+		captureStdout(func() {
+			runOrchestrate(global, []string{"--input", "temp alert syslog", "--task", "Mitigate high temperature"})
+		})
+
+		if capturedFilterTask != "Mitigate high temperature" {
+			t.Errorf("expected sensory task query param 'Mitigate high temperature', got '%s'", capturedFilterTask)
+		}
+		if capturedFilterText != "temp alert syslog" {
+			t.Errorf("expected sensory text 'temp alert syslog', got '%s'", capturedFilterText)
+		}
+		if capturedDelibReq.Objective != "Mitigate high temperature" {
+			t.Errorf("expected DeliberateRequest.Objective 'Mitigate high temperature', got '%s'", capturedDelibReq.Objective)
+		}
+	})
+
+	t.Run("--directive sets TaskDirective", func(t *testing.T) {
+		captureStdout(func() {
+			runOrchestrate(global, []string{"--input", "temp alert syslog", "--directive", "Directive only goal"})
+		})
+
+		if capturedFilterTask != "Directive only goal" {
+			t.Errorf("expected sensory task query param 'Directive only goal', got '%s'", capturedFilterTask)
+		}
+		if capturedDelibReq.Objective != "Directive only goal" {
+			t.Errorf("expected DeliberateRequest.Objective 'Directive only goal', got '%s'", capturedDelibReq.Objective)
+		}
+	})
+
+	t.Run("--directive takes precedence over --task if both provided", func(t *testing.T) {
+		captureStdout(func() {
+			runOrchestrate(global, []string{"--input", "temp alert syslog", "--directive", "Primary directive", "--task", "Secondary task"})
+		})
+
+		if capturedFilterTask != "Primary directive" {
+			t.Errorf("expected sensory task query param 'Primary directive', got '%s'", capturedFilterTask)
+		}
+		if capturedDelibReq.Objective != "Primary directive" {
+			t.Errorf("expected DeliberateRequest.Objective 'Primary directive', got '%s'", capturedDelibReq.Objective)
+		}
+	})
+}
+
 
