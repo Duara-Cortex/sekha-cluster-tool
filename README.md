@@ -161,8 +161,27 @@ sekha-cluster-tool deliberate \
 ```
 
 ### 5. Episodic Consolidation (`consolidate`)
-Commits completed deliberation traces for background Hebbian reinforcement and decay:
+Commits completed deliberation traces for background Hebbian reinforcement and decay.
 
+**Positional Shortcut (Quick Memorisation):**
+Persist facts directly without manual JSON escaping or `--trace`:
+```bash
+sekha-cluster-tool consolidate "<label>" "<summary>" [--anchor "<anchor>"] [--sync]
+
+# Example:
+sekha-cluster-tool consolidate "Project Kestrel" "INGEST_PORT: 51742; AUTH_HEADER: X-Kestrel-Key" \
+  -a "#project:kestrel" \
+  --sync
+```
+
+**Full Episodic Trace Mode:**
+```bash
+sekha-cluster-tool consolidate \
+  --trace '{"session_id":"sess-101","sensory_context":[...]}' \
+  -a "#project:kestrel" \
+  --sync
+```
+Or via flag-based trace metadata:
 ```bash
 sekha-cluster-tool consolidate \
   --goal "Mitigate hardware fault" \
@@ -173,12 +192,12 @@ sekha-cluster-tool consolidate \
 ```
 
 ### 6. Closed-Loop Cognitive Cycle (`orchestrate`)
-Coordinates the entire 4-stage loop in a single command, collecting stage telemetry:
+Coordinates the entire 4-stage loop in a single command, collecting stage telemetry. Supports `--task` as an alias for `--directive`:
 
 ```bash
 sekha-cluster-tool orchestrate \
   --input "syslog telemetry stream" \
-  --directive "Investigate and resolve alert" \
+  --task "Investigate and resolve alert" \
   -a "#project:kestrel" \
   --sync
 ```

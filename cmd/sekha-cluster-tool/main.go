@@ -467,6 +467,30 @@ func setDoubleDashUsage(fs *flag.FlagSet) {
 	}
 }
 
+// parseFlagSetWithPositionals parses flags from args while allowing positional arguments
+// to appear before, between, or after flags. Returns the positional arguments in order.
+func parseFlagSetWithPositionals(fs *flag.FlagSet, args []string) ([]string, error) {
+	var positional []string
+	remaining := args
+	for len(remaining) > 0 {
+		if err := fs.Parse(remaining); err != nil {
+			return nil, err
+		}
+		parsedArgs := fs.Args()
+		if len(parsedArgs) == 0 {
+			break
+		}
+		if len(remaining) > 0 && remaining[0] == "--" {
+			positional = append(positional, parsedArgs...)
+			break
+		}
+		positional = append(positional, parsedArgs[0])
+		remaining = parsedArgs[1:]
+	}
+	return positional, nil
+}
+
+
 func validateFormat(raw string) (string, error) {
 	if raw == "" {
 		return "json", nil
@@ -865,6 +889,15 @@ func runDeliberate(global GlobalFlags, args []string) {
 // runConsolidate handles the 'consolidate' subcommand.
 func runConsolidate(global GlobalFlags, args []string) {
 	fs := flag.NewFlagSet("consolidate", flag.ExitOnError)
+	setDoubleDashUsage(fs)
+	origUsage := fs.Usage
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage:\n")
+		fmt.Fprintf(fs.Output(), "  sekha-cluster-tool consolidate \"<label>\" \"<summary>\" [options...]\n")
+		fmt.Fprintf(fs.Output(), "  sekha-cluster-tool consolidate --trace '<json>' [options...]\n\n")
+		origUsage()
+	}
+
 	traceJSONFlag := fs.String("trace", "", "JSON string or path to episodic trace file")
 	sessionIDFlag := fs.String("session-id", "", "Session identifier")
 	goalFlag := fs.String("goal", "", "Task goal description")
@@ -880,7 +913,8 @@ func runConsolidate(global GlobalFlags, args []string) {
 	var anchorFlags anchorSliceFlag
 	fs.Var(&anchorFlags, "anchor", "Target anchor tag (repeatable or comma-delimited, e.g. -a \"#project:kestrel\")")
 	fs.Var(&anchorFlags, "a", "Target anchor tag alias")
-	_ = fs.Parse(args)
+
+	positionalArgs, _ := parseFlagSetWithPositionals(fs, args)
 
 	verbose := global.Verbose || *verboseFlag
 	telemetry.SetVerbose(verbose)
@@ -925,26 +959,59 @@ func runConsolidate(global GlobalFlags, args []string) {
 		if err := json.Unmarshal(content, &req); err != nil {
 			outputError(traceID, fmt.Sprintf("Error unmarshalling trace JSON: %v", err))
 		}
-	}
 
-	if len(anchors) > 0 {
-		req.Anchors = model.ParseAnchors(append(req.Anchors, anchors...)...)
-	}
+		if len(anchors) > 0 {
+			req.Anchors = model.ParseAnchors(append(req.Anchors, anchors...)...)
+		}
 
-	if *sessionIDFlag != "" {
-		req.SessionID = *sessionIDFlag
+		if *sessionIDFlag != "" {
+			req.SessionID = *sessionIDFlag
+		}
+		if req.SessionID == "" {
+			req.SessionID = fmt.Sprintf("session-%d", time.Now().Unix())
+		}
+		if *goalFlag != "" {
+			req.TaskGoal = *goalFlag
+		} else if len(positionalArgs) == 1 && req.TaskGoal == "" {
+			req.TaskGoal = positionalArgs[0]
+		}
+		if *outcomeFlag != "" {
+			req.Outcome = *outcomeFlag
+		}
+		req.Synchronous = *syncFlag
+		req.TraceID = traceID
+	} else if len(positionalArgs) >= 2 {
+		req = model.BuildPositionalConsolidation(
+			positionalArgs[0],
+			positionalArgs[1],
+			*sessionIDFlag,
+			*goalFlag,
+			*outcomeFlag,
+			anchors,
+			*syncFlag,
+			traceID,
+		)
+	} else {
+		if len(anchors) > 0 {
+			req.Anchors = anchors
+		}
+		if *sessionIDFlag != "" {
+			req.SessionID = *sessionIDFlag
+		}
+		if req.SessionID == "" {
+			req.SessionID = fmt.Sprintf("session-%d", time.Now().Unix())
+		}
+		if *goalFlag != "" {
+			req.TaskGoal = *goalFlag
+		} else if len(positionalArgs) == 1 {
+			req.TaskGoal = positionalArgs[0]
+		}
+		if *outcomeFlag != "" {
+			req.Outcome = *outcomeFlag
+		}
+		req.Synchronous = *syncFlag
+		req.TraceID = traceID
 	}
-	if req.SessionID == "" {
-		req.SessionID = fmt.Sprintf("session-%d", time.Now().Unix())
-	}
-	if *goalFlag != "" {
-		req.TaskGoal = *goalFlag
-	}
-	if *outcomeFlag != "" {
-		req.Outcome = *outcomeFlag
-	}
-	req.Synchronous = *syncFlag
-	req.TraceID = traceID
 
 	knowledgeClient := client.NewKnowledgeClient(cfg.KnowledgeURL, cfg.DefaultTimeout, cfg.APIKey)
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.DefaultTimeout)
@@ -961,9 +1028,11 @@ func runConsolidate(global GlobalFlags, args []string) {
 // runOrchestrate handles the 'orchestrate' / 'run-loop' subcommand.
 func runOrchestrate(global GlobalFlags, args []string) {
 	fs := flag.NewFlagSet("orchestrate", flag.ExitOnError)
+	setDoubleDashUsage(fs)
 	inputFlag := fs.String("input", "", "Raw sensory stream or log text")
 	fileFlag := fs.String("file", "", "Path to raw input file (or '-' for stdin)")
 	directiveFlag := fs.String("directive", "", "High-level cognitive goal or task directive")
+	taskFlag := fs.String("task", "", "Alias for --directive: High-level cognitive goal or task directive")
 	thresholdFlag := fs.Float64("threshold", 0.0, "Salience retention threshold")
 	topKFlag := fs.Int("top-k", 0, "Number of associative knowledge nodes to recall")
 	maxTokensFlag := fs.Int("max-tokens", 256, "Max tokens for working memory deliberation")
@@ -985,7 +1054,7 @@ func runOrchestrate(global GlobalFlags, args []string) {
 	fs.Var(&anchorFlags, "a", "Target anchor tag alias")
 	anchorModeFlag := fs.String("anchor-mode", "boost", "Anchor recall mode: boost or filter (default: boost)")
 	includeEmbeddingsFlag := fs.Bool("include-embeddings", false, "Include vector embeddings in recall results (default: false)")
-	_ = fs.Parse(args)
+	_, _ = parseFlagSetWithPositionals(fs, args)
 
 	verbose := global.Verbose || *verboseFlag
 	telemetry.SetVerbose(verbose)
@@ -1035,8 +1104,13 @@ func runOrchestrate(global GlobalFlags, args []string) {
 		outputError(traceID, fmt.Sprintf("Error reading input: %v", err))
 	}
 
-	if rawText == "" && *directiveFlag == "" {
-		outputError(traceID, "Must provide either --input/--file or --directive")
+	directive := strings.TrimSpace(*directiveFlag)
+	if directive == "" {
+		directive = strings.TrimSpace(*taskFlag)
+	}
+
+	if rawText == "" && directive == "" {
+		outputError(traceID, "Must provide either --input/--file or --task/--directive")
 	}
 
 	orch := orchestrator.NewOrchestrator(*cfg)
@@ -1044,7 +1118,7 @@ func runOrchestrate(global GlobalFlags, args []string) {
 
 	req := model.OrchestrateRequest{
 		RawInput:               rawText,
-		TaskDirective:          *directiveFlag,
+		TaskDirective:          directive,
 		FilterThreshold:        cfg.SalienceThreshold,
 		RecallTopK:             cfg.RecallTopK,
 		MaxTokens:              *maxTokensFlag,

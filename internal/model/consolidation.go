@@ -1,6 +1,10 @@
 package model
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
 
 // SensoryItem captures a salient sensory chunk preserved in episodic context.
 type SensoryItem struct {
@@ -46,3 +50,53 @@ type ConsolidateResponse struct {
 	NodesFused        int    `json:"nodes_fused,omitempty"`
 	EdgesReinforced   int    `json:"edges_reinforced,omitempty"`
 }
+
+// BuildPositionalConsolidation constructs a ConsolidateRequest from positional shortcut arguments.
+func BuildPositionalConsolidation(label, summary, sessionID, goal, outcome string, anchors []string, sync bool, traceID string) ConsolidateRequest {
+	now := time.Now().UTC()
+	trimmedLabel := strings.TrimSpace(label)
+	trimmedSummary := strings.TrimSpace(summary)
+
+	text := fmt.Sprintf("%s config: %s", trimmedLabel, trimmedSummary)
+	if strings.HasPrefix(trimmedSummary, trimmedLabel) || strings.HasPrefix(strings.ToLower(trimmedSummary), strings.ToLower(trimmedLabel)) {
+		text = trimmedSummary
+	}
+
+	if goal == "" {
+		goal = "Store " + trimmedLabel + " configuration"
+	}
+	if sessionID == "" {
+		sessionID = fmt.Sprintf("sess-memorise-%d", now.Unix())
+	}
+	if outcome == "" {
+		outcome = "success"
+	}
+
+	return ConsolidateRequest{
+		TraceID:     traceID,
+		SessionID:   sessionID,
+		TaskGoal:    goal,
+		Outcome:     outcome,
+		Status:      "completed",
+		SensoryContext: []SensoryItem{
+			{
+				ID:        "fact-01",
+				Text:      text,
+				Salience:  1.0,
+				Source:    "user",
+				Timestamp: now,
+			},
+		},
+		Trajectory: []TrajectoryStep{
+			{
+				StepIndex: 0,
+				Thought:   fmt.Sprintf("Committed %s configuration to long-term memory", trimmedLabel),
+				Status:    "completed",
+				Timestamp: now,
+			},
+		},
+		Anchors:     ParseAnchors(anchors...),
+		Synchronous: sync,
+	}
+}
+
