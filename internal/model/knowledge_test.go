@@ -467,3 +467,145 @@ func TestRecallResponse_FormatMarkdown(t *testing.T) {
 	})
 }
 
+func TestRecallResponse_Filter(t *testing.T) {
+	newSampleResponse := func() RecallResponse {
+		return RecallResponse{
+			Nodes: []ScoredNode{
+				{
+					Node: Node{
+						ID:         "node-001",
+						Label:      "Kernel Policy",
+						EntityType: "policy",
+						Summary:    "Kernel failure mitigation policy",
+					},
+					Score:    0.95,
+					SimScore: 0.85,
+				},
+				{
+					Node: Node{
+						ID:         "node-002",
+						Label:      "Fan Controller",
+						EntityType: "device",
+						Summary:    "Hardware fan controller interface",
+					},
+					Score:    0.80,
+					SimScore: 0.70,
+				},
+				{
+					Node: Node{
+						ID:         "node-003",
+						Label:      "Thermal Config",
+						EntityType: "config",
+						Summary:    "Configuration for thermal alerts",
+					},
+					Score:    0.65,
+					SimScore: 0.55,
+				},
+				{
+					Node: Node{
+						ID:         "node-004",
+						Label:      "Fallback Policy",
+						EntityType: "policy",
+						Summary:    "Secondary thermal policy",
+					},
+					Score:    0.50,
+					SimScore: 0.40,
+				},
+			},
+			Edges: []Edge{
+				{SourceID: "node-001", TargetID: "node-002", RelationType: "governs", Weight: 0.90}, // policy -> device
+				{SourceID: "node-001", TargetID: "node-004", RelationType: "triggers", Weight: 0.80}, // policy -> policy
+				{SourceID: "node-002", TargetID: "node-003", RelationType: "uses", Weight: 0.70},     // device -> config
+				{SourceID: "node-003", TargetID: "node-004", RelationType: "updates", Weight: 0.60},  // config -> policy
+			},
+			QueryLatencyMS: 1.25,
+		}
+	}
+
+	t.Run("filter by entity type case-insensitively", func(t *testing.T) {
+		resp := newSampleResponse()
+		resp.Filter("POLICY", 0)
+
+		if len(resp.Nodes) != 2 {
+			t.Fatalf("expected 2 policy nodes, got %d", len(resp.Nodes))
+		}
+		if resp.Nodes[0].ID != "node-001" || resp.Nodes[1].ID != "node-004" {
+			t.Errorf("unexpected nodes retained: %+v", resp.Nodes)
+		}
+		// Edges: only node-001 -> node-004 should be retained
+		if len(resp.Edges) != 1 {
+			t.Fatalf("expected 1 edge connecting policy nodes, got %d", len(resp.Edges))
+		}
+		if resp.Edges[0].SourceID != "node-001" || resp.Edges[0].TargetID != "node-004" {
+			t.Errorf("unexpected edge retained: %+v", resp.Edges[0])
+		}
+	})
+
+	t.Run("filter by min-score", func(t *testing.T) {
+		resp := newSampleResponse()
+		resp.Filter("", 0.70)
+
+		if len(resp.Nodes) != 2 {
+			t.Fatalf("expected 2 nodes with score >= 0.70, got %d", len(resp.Nodes))
+		}
+		if resp.Nodes[0].ID != "node-001" || resp.Nodes[1].ID != "node-002" {
+			t.Errorf("unexpected nodes retained: %+v", resp.Nodes)
+		}
+		// Edges: only node-001 -> node-002 should be retained
+		if len(resp.Edges) != 1 {
+			t.Fatalf("expected 1 edge connecting nodes with score >= 0.70, got %d", len(resp.Edges))
+		}
+		if resp.Edges[0].SourceID != "node-001" || resp.Edges[0].TargetID != "node-002" {
+			t.Errorf("unexpected edge retained: %+v", resp.Edges[0])
+		}
+	})
+
+	t.Run("combined filter by type and min-score", func(t *testing.T) {
+		resp := newSampleResponse()
+		// Only policy with score >= 0.65 -> only node-001 (0.95), node-004 is 0.50
+		resp.Filter("policy", 0.65)
+
+		if len(resp.Nodes) != 1 {
+			t.Fatalf("expected 1 node, got %d", len(resp.Nodes))
+		}
+		if resp.Nodes[0].ID != "node-001" {
+			t.Errorf("expected node-001, got %s", resp.Nodes[0].ID)
+		}
+		// All edges should be pruned because no other nodes were retained
+		if len(resp.Edges) != 0 {
+			t.Fatalf("expected 0 edges, got %d", len(resp.Edges))
+		}
+	})
+
+	t.Run("edge pruning removes orphaned relations", func(t *testing.T) {
+		resp := newSampleResponse()
+		// Filter by config -> only node-003 retained
+		resp.Filter("config", 0)
+
+		if len(resp.Nodes) != 1 || resp.Nodes[0].ID != "node-003" {
+			t.Fatalf("expected only node-003, got %+v", resp.Nodes)
+		}
+		if len(resp.Edges) != 0 {
+			t.Errorf("expected all edges pruned, got %d edges", len(resp.Edges))
+		}
+	})
+
+	t.Run("empty criteria retains all", func(t *testing.T) {
+		resp := newSampleResponse()
+		resp.Filter("", 0.0)
+
+		if len(resp.Nodes) != 4 {
+			t.Errorf("expected all 4 nodes retained, got %d", len(resp.Nodes))
+		}
+		if len(resp.Edges) != 4 {
+			t.Errorf("expected all 4 edges retained, got %d", len(resp.Edges))
+		}
+	})
+
+	t.Run("nil response does not panic", func(t *testing.T) {
+		var resp *RecallResponse
+		resp.Filter("policy", 0.8)
+	})
+}
+
+

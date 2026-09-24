@@ -26,6 +26,8 @@ func TestParseArgs_FlagPositions(t *testing.T) {
 		expectedAnchorMode        string
 		expectedIncludeEmbeddings bool
 		expectedFormat            string
+		expectedEntityType        string
+		expectedMinScore          float64
 		expectedArgs              []string
 	}{
 		{
@@ -159,6 +161,37 @@ func TestParseArgs_FlagPositions(t *testing.T) {
 			expectedFormat:     "json",
 			expectedArgs:       []string{"--query", "port"},
 		},
+		{
+			name:               "type flag --type before subcommand",
+			args:               []string{"--type", "policy", "recall", "--query", "port"},
+			expectedSubcommand: "recall",
+			expectedEntityType: "policy",
+			expectedArgs:       []string{"--query", "port"},
+		},
+		{
+			name:               "type flag -t alias after subcommand",
+			args:               []string{"recall", "--query", "port", "-t", "config"},
+			expectedSubcommand: "recall",
+			expectedEntityType: "config",
+			expectedArgs:       []string{"--query", "port"},
+		},
+		{
+			name:               "min-score flag after subcommand",
+			args:               []string{"recall", "--query", "port", "--min-score", "0.75"},
+			expectedSubcommand: "recall",
+			expectedMinScore:   0.75,
+			expectedArgs:       []string{"--query", "port"},
+		},
+		{
+			name:               "combined flags: anchor, type, min-score, format",
+			args:               []string{"recall", "--query", "ingest port", "-a", "#project:kestrel", "--type", "config", "--min-score=0.65", "--format", "concise"},
+			expectedSubcommand: "recall",
+			expectedAnchors:    []string{"#project:kestrel"},
+			expectedEntityType: "config",
+			expectedMinScore:   0.65,
+			expectedFormat:     "concise",
+			expectedArgs:       []string{"--query", "ingest port"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -203,6 +236,12 @@ func TestParseArgs_FlagPositions(t *testing.T) {
 			}
 			if global.Format != tt.expectedFormat {
 				t.Errorf("expected Format '%s', got '%s'", tt.expectedFormat, global.Format)
+			}
+			if global.EntityType != tt.expectedEntityType {
+				t.Errorf("expected EntityType '%s', got '%s'", tt.expectedEntityType, global.EntityType)
+			}
+			if global.MinScore != tt.expectedMinScore {
+				t.Errorf("expected MinScore %f, got %f", tt.expectedMinScore, global.MinScore)
 			}
 			if len(remaining) != len(tt.expectedArgs) {
 				t.Fatalf("expected remaining args length %d, got %d (%v)", len(tt.expectedArgs), len(remaining), remaining)
@@ -425,3 +464,144 @@ func TestRenderRecallOutput(t *testing.T) {
 		}
 	})
 }
+
+func TestRecall_EntityFilteringAndPruning(t *testing.T) {
+	newResponse := func() *model.RecallResponse {
+		return &model.RecallResponse{
+			Nodes: []model.ScoredNode{
+				{
+					Node: model.Node{
+						ID:         "node-001",
+						Label:      "Network Gateway Policy",
+						EntityType: "policy",
+						Summary:    "Ingress filtering policy",
+						Anchors:    []string{"#project:kestrel"},
+					},
+					Score:    0.95,
+					SimScore: 0.85,
+				},
+				{
+					Node: model.Node{
+						ID:         "node-002",
+						Label:      "Ethernet Device",
+						EntityType: "device",
+						Summary:    "Physical eth0 interface",
+					},
+					Score:    0.80,
+					SimScore: 0.70,
+				},
+				{
+					Node: model.Node{
+						ID:         "node-003",
+						Label:      "Port Ingest Config",
+						EntityType: "config",
+						Summary:    "Telemetry ingest port mapping",
+						Anchors:    []string{"#project:kestrel"},
+					},
+					Score:    0.72,
+					SimScore: 0.62,
+				},
+				{
+					Node: model.Node{
+						ID:         "node-004",
+						Label:      "Low Priority Config",
+						EntityType: "config",
+						Summary:    "Legacy fallback port",
+					},
+					Score:    0.50,
+					SimScore: 0.40,
+				},
+			},
+			Edges: []model.Edge{
+				{SourceID: "node-001", TargetID: "node-002", RelationType: "controls", Weight: 0.90},
+				{SourceID: "node-001", TargetID: "node-003", RelationType: "configures", Weight: 0.85},
+				{SourceID: "node-003", TargetID: "node-004", RelationType: "overrides", Weight: 0.70},
+			},
+			QueryLatencyMS: 1.25,
+		}
+	}
+
+	t.Run("entity type filtering drops non-matching types", func(t *testing.T) {
+		resp := newResponse()
+		resp.Filter("config", 0.0)
+
+		if len(resp.Nodes) != 2 {
+			t.Fatalf("expected 2 config nodes, got %d", len(resp.Nodes))
+		}
+		for _, n := range resp.Nodes {
+			if !strings.EqualFold(n.EntityType, "config") {
+				t.Errorf("expected only config entity type, got %s", n.EntityType)
+			}
+		}
+		// Edges: node-001 is dropped, so controls and configures are pruned; node-003 -> node-004 is kept
+		if len(resp.Edges) != 1 {
+			t.Fatalf("expected 1 edge connecting config nodes, got %d", len(resp.Edges))
+		}
+		if resp.Edges[0].SourceID != "node-003" || resp.Edges[0].TargetID != "node-004" {
+			t.Errorf("unexpected edge retained: %+v", resp.Edges[0])
+		}
+	})
+
+	t.Run("min-score filtering drops nodes below threshold", func(t *testing.T) {
+		resp := newResponse()
+		resp.Filter("", 0.75)
+
+		// Retained: node-001 (0.95), node-002 (0.80). node-003 (0.72) and node-004 (0.50) dropped
+		if len(resp.Nodes) != 2 {
+			t.Fatalf("expected 2 nodes with score >= 0.75, got %d", len(resp.Nodes))
+		}
+		if resp.Nodes[0].ID != "node-001" || resp.Nodes[1].ID != "node-002" {
+			t.Errorf("unexpected nodes retained: %+v", resp.Nodes)
+		}
+		// Edges: only node-001 -> node-002 should remain
+		if len(resp.Edges) != 1 {
+			t.Fatalf("expected 1 edge connecting retained nodes, got %d", len(resp.Edges))
+		}
+		if resp.Edges[0].SourceID != "node-001" || resp.Edges[0].TargetID != "node-002" {
+			t.Errorf("unexpected edge retained: %+v", resp.Edges[0])
+		}
+	})
+
+	t.Run("edge pruning removes orphaned relations when target dropped", func(t *testing.T) {
+		resp := newResponse()
+		// Retain only node-001 (0.95)
+		resp.Filter("", 0.90)
+
+		if len(resp.Nodes) != 1 || resp.Nodes[0].ID != "node-001" {
+			t.Fatalf("expected only node-001, got %+v", resp.Nodes)
+		}
+		if len(resp.Edges) != 0 {
+			t.Fatalf("expected all edges pruned, got %d edges", len(resp.Edges))
+		}
+	})
+
+	t.Run("combined pipeline with concise format", func(t *testing.T) {
+		resp := newResponse()
+		// Filter by config with min-score 0.65 -> only node-003 (0.72)
+		resp.Filter("config", 0.65)
+
+		if len(resp.Nodes) != 1 || resp.Nodes[0].ID != "node-003" {
+			t.Fatalf("expected only node-003, got %+v", resp.Nodes)
+		}
+		if len(resp.Edges) != 0 {
+			t.Fatalf("expected 0 edges, got %d", len(resp.Edges))
+		}
+
+		var buf bytes.Buffer
+		if err := renderRecallOutput(&buf, resp, "concise"); err != nil {
+			t.Fatalf("render error: %v", err)
+		}
+		out := buf.String()
+
+		if !strings.Contains(out, "# Recall Results (1 nodes, 1.25ms)") {
+			t.Errorf("missing header in output:\n%s", out)
+		}
+		if !strings.Contains(out, "- [node-003] **Port Ingest Config** (`config`, score: 0.72, sim: 0.62)") {
+			t.Errorf("missing node-003 in output:\n%s", out)
+		}
+		if strings.Contains(out, "Relational Subgraph") {
+			t.Errorf("should not contain relational subgraph when edges are pruned:\n%s", out)
+		}
+	})
+}
+
