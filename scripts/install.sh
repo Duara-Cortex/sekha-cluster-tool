@@ -171,6 +171,23 @@ echo "   Successfully installed ${TOOL_NAME} to:"
 echo "   ${INSTALL_DIR}/${TOOL_NAME}"
 echo "==========================================================="
 
+# Copy .env to bin folder if valid, or prompt user
+if [ -f ".env" ]; then
+    SENSORY="$(grep -E '^CLUSTER_SENSORY_URL=' .env 2>/dev/null | cut -d= -f2- | tr -d '\r"' | tr -d "'")"
+    WORKING="$(grep -E '^CLUSTER_WORKING_URL=' .env 2>/dev/null | cut -d= -f2- | tr -d '\r"' | tr -d "'")"
+    KNOWLEDGE="$(grep -E '^CLUSTER_KNOWLEDGE_URL=' .env 2>/dev/null | cut -d= -f2- | tr -d '\r"' | tr -d "'")"
+
+    if [ -n "$SENSORY" ] && [ -n "$WORKING" ] && [ -n "$KNOWLEDGE" ] && \
+       ! echo "$SENSORY" | grep -q "<" && ! echo "$WORKING" | grep -q "<" && ! echo "$KNOWLEDGE" | grep -q "<"; then
+        cp ".env" "${INSTALL_DIR}/.env"
+        echo "✓ Copied verified .env to ${INSTALL_DIR}/.env"
+    else
+        echo "⚠️  Local .env is incomplete. Run './scripts/setup-env.sh' to configure your endpoints."
+    fi
+else
+    echo "ℹ️  No .env file found. Run './scripts/setup-env.sh' to configure your endpoints."
+fi
+
 # Check PATH
 case ":$PATH:" in
     *:"$INSTALL_DIR":*) ;;

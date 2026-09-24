@@ -13,6 +13,7 @@ func TestParseArgs_FlagPositions(t *testing.T) {
 		expectedSensory           string
 		expectedWorking           string
 		expectedKnowledge         string
+		expectedAPIKey            string
 		expectedVerbose           bool
 		expectedTimeout           time.Duration
 		expectedAnchors           []string
@@ -109,6 +110,27 @@ func TestParseArgs_FlagPositions(t *testing.T) {
 			expectedIncludeEmbeddings: true,
 			expectedArgs:              []string{"--query", "port"},
 		},
+		{
+			name:               "api-key flag before subcommand",
+			args:               []string{"--api-key", "secret-test-key", "status"},
+			expectedSubcommand: "status",
+			expectedAPIKey:     "secret-test-key",
+			expectedArgs:       []string{},
+		},
+		{
+			name:               "inline api-key flag after subcommand",
+			args:               []string{"recall", "--api-key=inline-secret-key", "--query", "port"},
+			expectedSubcommand: "recall",
+			expectedAPIKey:     "inline-secret-key",
+			expectedArgs:       []string{"--query", "port"},
+		},
+		{
+			name:               "legacy key alias",
+			args:               []string{"--key", "legacy-key", "status"},
+			expectedSubcommand: "status",
+			expectedAPIKey:     "legacy-key",
+			expectedArgs:       []string{},
+		},
 	}
 
 	for _, tt := range tests {
@@ -126,6 +148,9 @@ func TestParseArgs_FlagPositions(t *testing.T) {
 			}
 			if global.KnowledgeURL != tt.expectedKnowledge {
 				t.Errorf("expected KnowledgeURL '%s', got '%s'", tt.expectedKnowledge, global.KnowledgeURL)
+			}
+			if global.APIKey != tt.expectedAPIKey {
+				t.Errorf("expected APIKey '%s', got '%s'", tt.expectedAPIKey, global.APIKey)
 			}
 			if global.Verbose != tt.expectedVerbose {
 				t.Errorf("expected Verbose %v, got %v", tt.expectedVerbose, global.Verbose)

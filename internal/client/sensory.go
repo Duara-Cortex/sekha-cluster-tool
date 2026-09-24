@@ -27,7 +27,7 @@ type SensoryClient struct {
 func NewSensoryClient(baseURL string, timeout time.Duration) *SensoryClient {
 	return &SensoryClient{
 		baseURL: strings.TrimRight(baseURL, "/"),
-		client:  NewBaseClient(timeout),
+		client:  NewBaseClient(timeout, ""),
 	}
 }
 

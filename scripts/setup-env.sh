@@ -30,6 +30,10 @@ read -r WORKING_URL
 printf "Enter Long-Term Knowledge Layer URL (e.g. path to your knowledge store layer): "
 read -r KNOWLEDGE_URL
 
+# Knowledge Store API Key
+printf "Enter Node 1 API Key (optional, press Enter to leave blank): "
+read -r API_KEY
+
 echo ""
 echo "--- Timing & Cognitive Defaults (press Enter to accept defaults) ---"
 
@@ -63,6 +67,9 @@ CLUSTER_WORKING_URL=${WORKING_URL}
 
 # Long-Term Knowledge Graph Store Layer
 CLUSTER_KNOWLEDGE_URL=${KNOWLEDGE_URL}
+
+# Authentication (optional API key for Node 1 protected endpoints)
+CLUSTER_API_KEY=${API_KEY}
 
 # Timeout Budgets (milliseconds)
 CLUSTER_DEFAULT_TIMEOUT_MS=${TIMEOUT_MS}

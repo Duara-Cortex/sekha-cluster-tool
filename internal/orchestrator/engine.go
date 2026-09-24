@@ -24,7 +24,7 @@ func NewOrchestrator(cfg client.Config) *Orchestrator {
 		cfg:       cfg,
 		sensory:   client.NewSensoryClient(cfg.SensoryURL, cfg.DefaultTimeout),
 		working:   client.NewWorkingClient(cfg.WorkingURL, cfg.DeliberateTimeout),
-		knowledge: client.NewKnowledgeClient(cfg.KnowledgeURL, cfg.DefaultTimeout),
+		knowledge: client.NewKnowledgeClient(cfg.KnowledgeURL, cfg.DefaultTimeout, cfg.APIKey),
 	}
 }
 

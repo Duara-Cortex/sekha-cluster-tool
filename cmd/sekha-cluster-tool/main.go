@@ -30,6 +30,7 @@ type GlobalFlags struct {
 	WorkingURL        string
 	KnowledgeURL      string
 	OrchestrationURL  string
+	APIKey            string
 	TraceID           string
 	Verbose           bool
 	Timeout           time.Duration
@@ -199,6 +200,19 @@ func parseArgs(rawArgs []string) (GlobalFlags, string, []string) {
 			continue
 		}
 
+		if m, val, inline := matchStringFlag(arg, "api-key", "key"); m {
+			if inline {
+				global.APIKey = val
+				i++
+			} else if i+1 < len(rawArgs) {
+				global.APIKey = rawArgs[i+1]
+				i += 2
+			} else {
+				i++
+			}
+			continue
+		}
+
 		if m, val, inline := matchStringFlag(arg, "trace-id"); m {
 			if inline {
 				global.TraceID = val
@@ -345,6 +359,7 @@ Global Flags:
   --working-url <url>        Working memory scratchpad URL (legacy alias: --node2-url)
   --knowledge-url <url>      Knowledge store & recall URL (legacy alias: --node1-url)
   --orchestration-url <url>  Orchestration working memory URL alias
+  --api-key <key>            Node 1 API key for protected knowledge endpoints
   --anchor, -a <tag>         Target anchor tag (repeatable or comma-delimited, e.g. -a "#project:kestrel")
   --anchor-mode <mode>       Anchor recall mode: boost or filter (default: boost)
   --include-embeddings       Include vector embeddings in recall responses (default: false)
@@ -357,6 +372,7 @@ Environment Variables (.env / OS):
   CLUSTER_SENSORY_URL    Sensory Buffer base URL (fallback: SEKHA_NODE3_URL)
   CLUSTER_WORKING_URL    Working Scratchpad base URL (fallback: SEKHA_NODE2_URL)
   CLUSTER_KNOWLEDGE_URL  Knowledge Store base URL (fallback: SEKHA_NODE1_URL)
+  CLUSTER_API_KEY        Node 1 API Key (fallback: SEKHA_API_KEY)
 `, Version)
 }
 
@@ -429,6 +445,7 @@ func runEnv(global GlobalFlags, args []string) {
 	case "show":
 		fs := flag.NewFlagSet("env show", flag.ExitOnError)
 		envFileFlag := fs.String("env-file", "", "Path to .env configuration file")
+		apiKeyFlag := fs.String("api-key", "", "API key for Node 1 authentication")
 		_ = fs.Parse(actionArgs)
 
 		cfg, err := config.Load(config.FlagOverrides{
@@ -436,6 +453,7 @@ func runEnv(global GlobalFlags, args []string) {
 			SensoryURL:   global.SensoryURL,
 			WorkingURL:   global.WorkingURL,
 			KnowledgeURL: global.KnowledgeURL,
+			APIKey:       pickURL(*apiKeyFlag, global.APIKey),
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
@@ -480,6 +498,7 @@ func runFilter(global GlobalFlags, args []string) {
 	cfg, err := config.Load(config.FlagOverrides{
 		EnvPath:           pickURL(*envFileFlag, global.EnvPath),
 		SensoryURL:        pickURL(*sensoryURLFlag, *node3URLFlag, global.SensoryURL),
+		APIKey:            pickURL(global.APIKey),
 		Timeout:           timeout,
 		SalienceThreshold: *thresholdFlag,
 	})
@@ -530,6 +549,7 @@ func runRecall(global GlobalFlags, args []string) {
 	hopsFlag := fs.Int("hops", 1, "Graph relational expansion hops")
 	knowledgeURLFlag := fs.String("knowledge-url", "", "Knowledge store endpoint URL")
 	node1URLFlag := fs.String("node1-url", "", "Legacy alias for --knowledge-url")
+	apiKeyFlag := fs.String("api-key", "", "API key for Node 1 authentication")
 	envFileFlag := fs.String("env-file", "", "Path to .env configuration file")
 	timeoutFlag := fs.Duration("timeout", 0, "Operation timeout budget")
 	traceIDFlag := fs.String("trace-id", "", "Distributed trace ID")
@@ -575,6 +595,7 @@ func runRecall(global GlobalFlags, args []string) {
 	cfg, err := config.Load(config.FlagOverrides{
 		EnvPath:      pickURL(*envFileFlag, global.EnvPath),
 		KnowledgeURL: pickURL(*knowledgeURLFlag, *node1URLFlag, global.KnowledgeURL),
+		APIKey:       pickURL(*apiKeyFlag, global.APIKey),
 		Timeout:      timeout,
 		RecallTopK:   *topKFlag,
 	})
@@ -586,7 +607,7 @@ func runRecall(global GlobalFlags, args []string) {
 		outputError(traceID, err.Error())
 	}
 
-	knowledgeClient := client.NewKnowledgeClient(cfg.KnowledgeURL, cfg.DefaultTimeout)
+	knowledgeClient := client.NewKnowledgeClient(cfg.KnowledgeURL, cfg.DefaultTimeout, cfg.APIKey)
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.DefaultTimeout)
 	defer cancel()
 
@@ -647,7 +668,8 @@ func runDeliberate(global GlobalFlags, args []string) {
 	cfg, err := config.Load(config.FlagOverrides{
 		EnvPath:           pickURL(*envFileFlag, global.EnvPath),
 		WorkingURL:        pickURL(*workingURLFlag, *node2URLFlag, *orchestrationURLFlag, global.WorkingURL, global.OrchestrationURL),
-		OrchestrationURL: pickURL(*orchestrationURLFlag, global.OrchestrationURL),
+		OrchestrationURL:  pickURL(*orchestrationURLFlag, global.OrchestrationURL),
+		APIKey:            pickURL(global.APIKey),
 		DeliberateTimeout: timeout,
 	})
 	if err != nil {
@@ -720,6 +742,7 @@ func runConsolidate(global GlobalFlags, args []string) {
 	syncFlag := fs.Bool("sync", false, "Execute synchronous consolidation cycle")
 	knowledgeURLFlag := fs.String("knowledge-url", "", "Knowledge store endpoint URL")
 	node1URLFlag := fs.String("node1-url", "", "Legacy alias for --knowledge-url")
+	apiKeyFlag := fs.String("api-key", "", "API key for Node 1 authentication")
 	envFileFlag := fs.String("env-file", "", "Path to .env configuration file")
 	timeoutFlag := fs.Duration("timeout", 0, "Operation timeout budget")
 	traceIDFlag := fs.String("trace-id", "", "Distributed trace ID")
@@ -746,6 +769,7 @@ func runConsolidate(global GlobalFlags, args []string) {
 	cfg, err := config.Load(config.FlagOverrides{
 		EnvPath:      pickURL(*envFileFlag, global.EnvPath),
 		KnowledgeURL: pickURL(*knowledgeURLFlag, *node1URLFlag, global.KnowledgeURL),
+		APIKey:       pickURL(*apiKeyFlag, global.APIKey),
 		Timeout:      timeout,
 	})
 	if err != nil {
@@ -792,7 +816,7 @@ func runConsolidate(global GlobalFlags, args []string) {
 	req.Synchronous = *syncFlag
 	req.TraceID = traceID
 
-	knowledgeClient := client.NewKnowledgeClient(cfg.KnowledgeURL, cfg.DefaultTimeout)
+	knowledgeClient := client.NewKnowledgeClient(cfg.KnowledgeURL, cfg.DefaultTimeout, cfg.APIKey)
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.DefaultTimeout)
 	defer cancel()
 
@@ -818,6 +842,7 @@ func runOrchestrate(global GlobalFlags, args []string) {
 	sensoryURLFlag := fs.String("sensory-url", "", "Sensory filter endpoint URL")
 	workingURLFlag := fs.String("working-url", "", "Working memory scratchpad endpoint URL")
 	knowledgeURLFlag := fs.String("knowledge-url", "", "Knowledge store endpoint URL")
+	apiKeyFlag := fs.String("api-key", "", "API key for Node 1 authentication")
 	node3URLFlag := fs.String("node3-url", "", "Legacy alias for --sensory-url")
 	node2URLFlag := fs.String("node2-url", "", "Legacy alias for --working-url")
 	node1URLFlag := fs.String("node1-url", "", "Legacy alias for --knowledge-url")
@@ -857,14 +882,15 @@ func runOrchestrate(global GlobalFlags, args []string) {
 	timeout := global.Timeout
 
 	cfg, err := config.Load(config.FlagOverrides{
-		EnvPath:          pickURL(*envFileFlag, global.EnvPath),
-		SensoryURL:       pickURL(*sensoryURLFlag, *node3URLFlag, global.SensoryURL),
-		WorkingURL:       pickURL(*workingURLFlag, *node2URLFlag, *orchestrationURLFlag, global.WorkingURL, global.OrchestrationURL),
-		KnowledgeURL:     pickURL(*knowledgeURLFlag, *node1URLFlag, global.KnowledgeURL),
-		OrchestrationURL: pickURL(*orchestrationURLFlag, global.OrchestrationURL),
-		Timeout:          timeout,
+		EnvPath:           pickURL(*envFileFlag, global.EnvPath),
+		SensoryURL:        pickURL(*sensoryURLFlag, *node3URLFlag, global.SensoryURL),
+		WorkingURL:        pickURL(*workingURLFlag, *node2URLFlag, *orchestrationURLFlag, global.WorkingURL, global.OrchestrationURL),
+		KnowledgeURL:      pickURL(*knowledgeURLFlag, *node1URLFlag, global.KnowledgeURL),
+		OrchestrationURL:  pickURL(*orchestrationURLFlag, global.OrchestrationURL),
+		APIKey:            pickURL(*apiKeyFlag, global.APIKey),
+		Timeout:           timeout,
 		SalienceThreshold: *thresholdFlag,
-		RecallTopK:       *topKFlag,
+		RecallTopK:        *topKFlag,
 	})
 	if err != nil {
 		outputError(traceID, err.Error())
@@ -913,6 +939,7 @@ func runStatus(global GlobalFlags, args []string) {
 	sensoryURLFlag := fs.String("sensory-url", "", "Sensory filter endpoint URL")
 	workingURLFlag := fs.String("working-url", "", "Working memory scratchpad endpoint URL")
 	knowledgeURLFlag := fs.String("knowledge-url", "", "Knowledge store endpoint URL")
+	apiKeyFlag := fs.String("api-key", "", "API key for Node 1 authentication")
 	node3URLFlag := fs.String("node3-url", "", "Legacy alias for --sensory-url")
 	node2URLFlag := fs.String("node2-url", "", "Legacy alias for --working-url")
 	node1URLFlag := fs.String("node1-url", "", "Legacy alias for --knowledge-url")
@@ -941,6 +968,7 @@ func runStatus(global GlobalFlags, args []string) {
 		WorkingURL:       pickURL(*workingURLFlag, *node2URLFlag, *orchestrationURLFlag, global.WorkingURL, global.OrchestrationURL),
 		KnowledgeURL:     pickURL(*knowledgeURLFlag, *node1URLFlag, global.KnowledgeURL),
 		OrchestrationURL: pickURL(*orchestrationURLFlag, global.OrchestrationURL),
+		APIKey:           pickURL(*apiKeyFlag, global.APIKey),
 		Timeout:          timeout,
 	})
 	if err != nil {
@@ -1043,7 +1071,7 @@ func runStatus(global GlobalFlags, args []string) {
 			Error:  "Endpoint address not set in .env, environment, flags, or build",
 		}
 	} else {
-		kClient := client.NewKnowledgeClient(cfg.KnowledgeURL, timeout)
+		kClient := client.NewKnowledgeClient(cfg.KnowledgeURL, timeout, cfg.APIKey)
 		t2 := time.Now()
 		ctx1, cancel1 := context.WithTimeout(context.Background(), timeout)
 		kHealth, err := kClient.GetHealth(ctx1, traceID)

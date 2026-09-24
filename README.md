@@ -36,8 +36,8 @@ The tool coordinates four discrete stages across three distributed cognitive lay
 
 All endpoint addresses default to blank (`""`). Configuration is resolved using the 12-factor standard with the following precedence order:
 
-1. **CLI Flags** (`--sensory-url`, `--working-url`, `--knowledge-url`)
-2. **Real OS Environment Variables** (`CLUSTER_SENSORY_URL`, `CLUSTER_WORKING_URL`, `CLUSTER_KNOWLEDGE_URL`)
+1. **CLI Flags** (`--sensory-url`, `--working-url`, `--knowledge-url`, `--api-key`)
+2. **Real OS Environment Variables** (`CLUSTER_SENSORY_URL`, `CLUSTER_WORKING_URL`, `CLUSTER_KNOWLEDGE_URL`, `CLUSTER_API_KEY`)
 3. **Environment File** (`.env`, `.env.local`, `--env-file <path>`, or `~/.config/sekha-cluster-tool/.env`)
 4. **Compile-time Builder Injection** (`make build SENSORY_URL=...`)
 
@@ -63,6 +63,9 @@ CLUSTER_WORKING_URL=
 
 # Long-Term Knowledge Graph Layer (e.g. http://<knowledge-node>:8084)
 CLUSTER_KNOWLEDGE_URL=
+
+# Authentication (optional API key for Node 1 protected endpoints; fallback: SEKHA_API_KEY)
+CLUSTER_API_KEY=
 
 # Timeout Budgets (milliseconds)
 CLUSTER_DEFAULT_TIMEOUT_MS=1500

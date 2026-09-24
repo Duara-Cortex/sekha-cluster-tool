@@ -24,6 +24,7 @@ type Config struct {
 	SensoryURL        string        `json:"sensory_url"`
 	WorkingURL        string        `json:"working_url"`
 	KnowledgeURL      string        `json:"knowledge_url"`
+	APIKey            string        `json:"api_key,omitempty"`
 	DefaultTimeout    time.Duration `json:"default_timeout"`
 	DeliberateTimeout time.Duration `json:"deliberate_timeout"`
 	SalienceThreshold float64       `json:"salience_threshold"`
@@ -38,6 +39,7 @@ type FlagOverrides struct {
 	WorkingURL        string
 	KnowledgeURL      string
 	OrchestrationURL  string
+	APIKey            string
 	Timeout           time.Duration
 	DeliberateTimeout time.Duration
 	SalienceThreshold float64
@@ -112,6 +114,9 @@ func Load(flags FlagOverrides) (*Config, error) {
 	if val := getEnv("CLUSTER_KNOWLEDGE_URL", "SEKHA_NODE1_URL"); val != "" {
 		cfg.KnowledgeURL = val
 	}
+	if val := getEnv("CLUSTER_API_KEY", "SEKHA_API_KEY"); val != "" {
+		cfg.APIKey = val
+	}
 
 	if val := getEnv("CLUSTER_DEFAULT_TIMEOUT_MS", ""); val != "" {
 		if ms, err := strconv.Atoi(val); err == nil && ms > 0 {
@@ -147,6 +152,9 @@ func Load(flags FlagOverrides) (*Config, error) {
 	if flags.OrchestrationURL != "" && cfg.WorkingURL == "" {
 		cfg.WorkingURL = flags.OrchestrationURL
 	}
+	if flags.APIKey != "" {
+		cfg.APIKey = flags.APIKey
+	}
 	if flags.Timeout > 0 {
 		cfg.DefaultTimeout = flags.Timeout
 	}
@@ -172,18 +180,23 @@ func resolveEnvPath(explicitPath string) string {
 		return env
 	}
 
-	candidates := []string{
-		".env.local",
-		".env",
-	}
-	for _, c := range candidates {
+	// 1. Current working directory
+	for _, c := range []string{".env.local", ".env"} {
 		if _, err := os.Stat(c); err == nil {
 			return c
 		}
 	}
 
-	home, err := os.UserHomeDir()
-	if err == nil {
+	// 2. Binary's install directory (e.g. ~/.local/bin/.env)
+	if exe, err := os.Executable(); err == nil {
+		binEnv := filepath.Join(filepath.Dir(exe), ".env")
+		if _, err := os.Stat(binEnv); err == nil {
+			return binEnv
+		}
+	}
+
+	// 3. User standard config directory (~/.config/sekha-cluster-tool/.env)
+	if home, err := os.UserHomeDir(); err == nil {
 		userConfig := filepath.Join(home, ".config", "sekha-cluster-tool", ".env")
 		if _, err := os.Stat(userConfig); err == nil {
 			return userConfig
@@ -295,6 +308,9 @@ CLUSTER_WORKING_URL=
 
 # Long-Term Knowledge Graph Layer (e.g. http://192.168.8.213:8084)
 CLUSTER_KNOWLEDGE_URL=
+
+# Node 1 API Key (optional authentication for protected knowledge endpoints)
+CLUSTER_API_KEY=
 
 # Timeout Budgets (milliseconds)
 CLUSTER_DEFAULT_TIMEOUT_MS=1500

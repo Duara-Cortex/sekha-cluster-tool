@@ -15,6 +15,8 @@ func TestConfig_BlankDefaults(t *testing.T) {
 	os.Unsetenv("SEKHA_NODE3_URL")
 	os.Unsetenv("SEKHA_NODE2_URL")
 	os.Unsetenv("SEKHA_NODE1_URL")
+	os.Unsetenv("CLUSTER_API_KEY")
+	os.Unsetenv("SEKHA_API_KEY")
 
 	cfg, err := Load(FlagOverrides{})
 	if err != nil {
@@ -29,6 +31,9 @@ func TestConfig_BlankDefaults(t *testing.T) {
 	}
 	if cfg.KnowledgeURL != "" {
 		t.Errorf("expected blank KnowledgeURL by default, got '%s'", cfg.KnowledgeURL)
+	}
+	if cfg.APIKey != "" {
+		t.Errorf("expected blank APIKey by default, got '%s'", cfg.APIKey)
 	}
 
 	if err := cfg.ValidateSensory(); err == nil {
@@ -190,5 +195,109 @@ func TestConfig_OrchestrationURLOverride(t *testing.T) {
 	}
 	if cfg.WorkingURL != "http://orchestrator-working:8083" {
 		t.Errorf("expected OrchestrationURL to set WorkingURL when WorkingURL is empty; got '%s'", cfg.WorkingURL)
+	}
+}
+
+func TestConfig_APIKeyResolution(t *testing.T) {
+	// Clean env
+	os.Unsetenv("CLUSTER_API_KEY")
+	os.Unsetenv("SEKHA_API_KEY")
+
+	// 1. From .env file with CLUSTER_API_KEY
+	tmpDir := t.TempDir()
+	envPath := filepath.Join(tmpDir, ".env")
+	if err := os.WriteFile(envPath, []byte("CLUSTER_API_KEY=key-from-dotenv\n"), 0644); err != nil {
+		t.Fatalf("failed to write test .env file: %v", err)
+	}
+
+	cfg, err := Load(FlagOverrides{EnvPath: envPath})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.APIKey != "key-from-dotenv" {
+		t.Errorf("expected APIKey 'key-from-dotenv', got '%s'", cfg.APIKey)
+	}
+
+	// 2. From .env file with fallback SEKHA_API_KEY
+	envPathFallback := filepath.Join(tmpDir, ".env.fallback")
+	if err := os.WriteFile(envPathFallback, []byte("SEKHA_API_KEY=key-from-sekha-dotenv\n"), 0644); err != nil {
+		t.Fatalf("failed to write test .env file: %v", err)
+	}
+
+	cfg, err = Load(FlagOverrides{EnvPath: envPathFallback})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.APIKey != "key-from-sekha-dotenv" {
+		t.Errorf("expected APIKey 'key-from-sekha-dotenv', got '%s'", cfg.APIKey)
+	}
+
+	// 3. OS environment fallback SEKHA_API_KEY
+	os.Setenv("SEKHA_API_KEY", "key-from-os-sekha")
+	defer os.Unsetenv("SEKHA_API_KEY")
+
+	cfg, err = Load(FlagOverrides{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.APIKey != "key-from-os-sekha" {
+		t.Errorf("expected APIKey 'key-from-os-sekha', got '%s'", cfg.APIKey)
+	}
+
+	// 4. OS environment primary CLUSTER_API_KEY takes precedence over SEKHA_API_KEY
+	os.Setenv("CLUSTER_API_KEY", "key-from-os-cluster")
+	defer os.Unsetenv("CLUSTER_API_KEY")
+
+	cfg, err = Load(FlagOverrides{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.APIKey != "key-from-os-cluster" {
+		t.Errorf("expected APIKey 'key-from-os-cluster', got '%s'", cfg.APIKey)
+	}
+
+	// 5. Flag override takes precedence over OS environment
+	cfg, err = Load(FlagOverrides{APIKey: "key-from-flag"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.APIKey != "key-from-flag" {
+		t.Errorf("expected APIKey 'key-from-flag', got '%s'", cfg.APIKey)
+	}
+}
+
+func TestConfig_ResolveEnvPath_ExecutableDir(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Skip("os.Executable() not supported on this platform")
+	}
+
+	exeDir := filepath.Dir(exe)
+	testEnv := filepath.Join(exeDir, ".env")
+
+	// Only test if .env doesn't already exist in the test binary directory
+	if _, err := os.Stat(testEnv); os.IsNotExist(err) {
+		if err := os.WriteFile(testEnv, []byte("TEST_VAR=1\n"), 0644); err == nil {
+			defer os.Remove(testEnv)
+
+			// Switch to a temp directory without any .env
+			tmpDir := t.TempDir()
+			origDir, err := os.Getwd()
+			if err != nil {
+				t.Fatalf("failed to get cwd: %v", err)
+			}
+			if err := os.Chdir(tmpDir); err != nil {
+				t.Fatalf("failed to chdir to tmpDir: %v", err)
+			}
+			defer os.Chdir(origDir)
+
+			// Clear CLUSTER_ENV_FILE
+			os.Unsetenv("CLUSTER_ENV_FILE")
+
+			resolved := resolveEnvPath("")
+			if resolved != testEnv {
+				t.Errorf("expected resolveEnvPath to find '%s', got '%s'", testEnv, resolved)
+			}
+		}
 	}
 }
