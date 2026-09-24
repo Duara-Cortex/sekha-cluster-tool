@@ -21,10 +21,11 @@ type Config = config.Config
 // BaseClient handles HTTP requests with connection pooling and trace injection.
 type BaseClient struct {
 	httpClient *http.Client
+	apiKey     string
 }
 
 // NewBaseClient creates a BaseClient with optimised connection pooling and keep-alive settings.
-func NewBaseClient(timeout time.Duration) *BaseClient {
+func NewBaseClient(timeout time.Duration, apiKey string) *BaseClient {
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
@@ -44,6 +45,7 @@ func NewBaseClient(timeout time.Duration) *BaseClient {
 			Transport: transport,
 			Timeout:   timeout,
 		},
+		apiKey: apiKey,
 	}
 }
 
@@ -64,6 +66,10 @@ func (c *BaseClient) PostJSON(ctx context.Context, url string, payload interface
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	if c.apiKey != "" {
+		req.Header.Set("X-API-Key", c.apiKey)
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
 	telemetry.InjectTraceID(req, traceID)
 
 	resp, err := c.httpClient.Do(req)
@@ -98,6 +104,10 @@ func (c *BaseClient) GetJSON(ctx context.Context, url string, target interface{}
 	}
 
 	req.Header.Set("Accept", "application/json")
+	if c.apiKey != "" {
+		req.Header.Set("X-API-Key", c.apiKey)
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
 	telemetry.InjectTraceID(req, traceID)
 
 	resp, err := c.httpClient.Do(req)

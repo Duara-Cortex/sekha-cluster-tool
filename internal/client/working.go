@@ -19,7 +19,7 @@ type WorkingClient struct {
 func NewWorkingClient(baseURL string, timeout time.Duration) *WorkingClient {
 	return &WorkingClient{
 		baseURL: baseURL,
-		client:  NewBaseClient(timeout),
+		client:  NewBaseClient(timeout, ""),
 	}
 }
 

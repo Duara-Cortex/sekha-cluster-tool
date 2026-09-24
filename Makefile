@@ -47,6 +47,22 @@ install: build
 	@mkdir -p $(INSTALL_DIR)
 	cp bin/$(BINARY_NAME) $(INSTALL_DIR)/$(BINARY_NAME)
 	@echo "Installed $(BINARY_NAME) to $(INSTALL_DIR)/$(BINARY_NAME)"
+	@if [ -f "$(ENV_FILE)" ]; then \
+		sensory=$$(grep -E '^CLUSTER_SENSORY_URL=' "$(ENV_FILE)" 2>/dev/null | cut -d= -f2- | tr -d '\r"' | tr -d "'"); \
+		working=$$(grep -E '^CLUSTER_WORKING_URL=' "$(ENV_FILE)" 2>/dev/null | cut -d= -f2- | tr -d '\r"' | tr -d "'"); \
+		knowledge=$$(grep -E '^CLUSTER_KNOWLEDGE_URL=' "$(ENV_FILE)" 2>/dev/null | cut -d= -f2- | tr -d '\r"' | tr -d "'"); \
+		if [ -n "$$sensory" ] && [ -n "$$working" ] && [ -n "$$knowledge" ] && \
+		   ! echo "$$sensory" | grep -q "<" && ! echo "$$working" | grep -q "<" && ! echo "$$knowledge" | grep -q "<"; then \
+			cp "$(ENV_FILE)" "$(INSTALL_DIR)/.env"; \
+			echo "✓ Valid $(ENV_FILE) verified and copied to $(INSTALL_DIR)/.env"; \
+		else \
+			echo "⚠️  $(ENV_FILE) is present but incomplete (missing endpoints or placeholders)."; \
+			echo "   Run './scripts/setup-env.sh' or 'make env' to complete configuration."; \
+		fi \
+	else \
+		echo "ℹ️  No $(ENV_FILE) found in repository."; \
+		echo "   Run './scripts/setup-env.sh' or 'make env' to configure your environment."; \
+	fi
 
 test:
 	go test -v -race -timeout 30s ./...

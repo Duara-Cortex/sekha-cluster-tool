@@ -16,10 +16,10 @@ type KnowledgeClient struct {
 }
 
 // NewKnowledgeClient initialises a client for Node 1.
-func NewKnowledgeClient(baseURL string, timeout time.Duration) *KnowledgeClient {
+func NewKnowledgeClient(baseURL string, timeout time.Duration, apiKey string) *KnowledgeClient {
 	return &KnowledgeClient{
 		baseURL: baseURL,
-		client:  NewBaseClient(timeout),
+		client:  NewBaseClient(timeout, apiKey),
 	}
 }
 

@@ -45,7 +45,7 @@ func TestKnowledgeClient_Recall_DefaultLeanSchema(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	client := NewKnowledgeClient(mockServer.URL, 2*time.Second)
+	client := NewKnowledgeClient(mockServer.URL, 2*time.Second, "")
 	req := model.RecallRequest{
 		Query:             "test query",
 		TopK:              5,
@@ -112,7 +112,7 @@ func TestKnowledgeClient_Recall_IncludeEmbeddings(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	client := NewKnowledgeClient(mockServer.URL, 2*time.Second)
+	client := NewKnowledgeClient(mockServer.URL, 2*time.Second, "")
 	req := model.RecallRequest{
 		Query:             "vector query",
 		TopK:              3,
@@ -165,7 +165,7 @@ func TestKnowledgeClient_Consolidate_AnchorForwarding(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	client := NewKnowledgeClient(mockServer.URL, 2*time.Second)
+	client := NewKnowledgeClient(mockServer.URL, 2*time.Second, "")
 	req := model.ConsolidateRequest{
 		SessionID:   "session-test-anchor",
 		TaskGoal:    "Deploy service",
@@ -188,5 +188,80 @@ func TestKnowledgeClient_Consolidate_AnchorForwarding(t *testing.T) {
 	}
 	if capturedBody.Anchors[0] != "#project:kestrel" || capturedBody.Anchors[1] != "#env:staging" {
 		t.Errorf("expected anchors ['#project:kestrel', '#env:staging'], got %v", capturedBody.Anchors)
+	}
+}
+
+func TestKnowledgeClient_AuthenticationHeaders(t *testing.T) {
+	var capturedAuthHeader string
+	var capturedAPIKeyHeader string
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedAuthHeader = r.Header.Get("Authorization")
+		capturedAPIKeyHeader = r.Header.Get("X-API-Key")
+
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/memory/recall" {
+			_ = json.NewEncoder(w).Encode(model.RecallResponse{})
+		} else if r.URL.Path == "/api/v1/memory/consolidate" {
+			_ = json.NewEncoder(w).Encode(model.ConsolidateResponse{Status: "success"})
+		} else if r.URL.Path == "/api/v1/memory/health" {
+			_ = json.NewEncoder(w).Encode(model.KnowledgeHealthResponse{Status: "healthy"})
+		}
+	}))
+	defer mockServer.Close()
+
+	// 1. With API Key configured
+	clientWithAuth := NewKnowledgeClient(mockServer.URL, 2*time.Second, "secret-test-key-123")
+
+	// Test Recall
+	_, err := clientWithAuth.Recall(context.Background(), model.RecallRequest{Query: "test"}, "trc-1")
+	if err != nil {
+		t.Fatalf("unexpected error in recall: %v", err)
+	}
+	if capturedAPIKeyHeader != "secret-test-key-123" {
+		t.Errorf("expected X-API-Key 'secret-test-key-123', got '%s'", capturedAPIKeyHeader)
+	}
+	if capturedAuthHeader != "Bearer secret-test-key-123" {
+		t.Errorf("expected Authorization 'Bearer secret-test-key-123', got '%s'", capturedAuthHeader)
+	}
+
+	// Test Consolidate
+	_, err = clientWithAuth.Consolidate(context.Background(), model.ConsolidateRequest{SessionID: "s1"}, "trc-2")
+	if err != nil {
+		t.Fatalf("unexpected error in consolidate: %v", err)
+	}
+	if capturedAPIKeyHeader != "secret-test-key-123" {
+		t.Errorf("expected X-API-Key 'secret-test-key-123', got '%s'", capturedAPIKeyHeader)
+	}
+	if capturedAuthHeader != "Bearer secret-test-key-123" {
+		t.Errorf("expected Authorization 'Bearer secret-test-key-123', got '%s'", capturedAuthHeader)
+	}
+
+	// Test Health
+	_, err = clientWithAuth.GetHealth(context.Background(), "trc-3")
+	if err != nil {
+		t.Fatalf("unexpected error in health: %v", err)
+	}
+	if capturedAPIKeyHeader != "secret-test-key-123" {
+		t.Errorf("expected X-API-Key 'secret-test-key-123', got '%s'", capturedAPIKeyHeader)
+	}
+	if capturedAuthHeader != "Bearer secret-test-key-123" {
+		t.Errorf("expected Authorization 'Bearer secret-test-key-123', got '%s'", capturedAuthHeader)
+	}
+
+	// 2. Without API Key configured (empty)
+	clientNoAuth := NewKnowledgeClient(mockServer.URL, 2*time.Second, "")
+	capturedAuthHeader = ""
+	capturedAPIKeyHeader = ""
+
+	_, err = clientNoAuth.Recall(context.Background(), model.RecallRequest{Query: "test"}, "trc-4")
+	if err != nil {
+		t.Fatalf("unexpected error in recall: %v", err)
+	}
+	if capturedAPIKeyHeader != "" {
+		t.Errorf("expected empty X-API-Key, got '%s'", capturedAPIKeyHeader)
+	}
+	if capturedAuthHeader != "" {
+		t.Errorf("expected empty Authorization header, got '%s'", capturedAuthHeader)
 	}
 }
