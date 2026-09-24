@@ -37,6 +37,7 @@ type GlobalFlags struct {
 	Anchors           []string
 	AnchorMode        string
 	IncludeEmbeddings bool
+	Format            string
 }
 
 // anchorSliceFlag enables repeatable and comma-delimited string flags.
@@ -275,6 +276,19 @@ func parseArgs(rawArgs []string) (GlobalFlags, string, []string) {
 			continue
 		}
 
+		if m, val, inline := matchStringFlag(arg, "format"); m {
+			if inline {
+				global.Format = val
+				i++
+			} else if i+1 < len(rawArgs) {
+				global.Format = rawArgs[i+1]
+				i += 2
+			} else {
+				i++
+			}
+			continue
+		}
+
 		if subcommand == "" && !strings.HasPrefix(arg, "-") {
 			subcommand = arg
 			i++
@@ -363,6 +377,7 @@ Global Flags:
   --anchor, -a <tag>         Target anchor tag (repeatable or comma-delimited, e.g. -a "#project:kestrel")
   --anchor-mode <mode>       Anchor recall mode: boost or filter (default: boost)
   --include-embeddings       Include vector embeddings in recall responses (default: false)
+  --format <format>          Output format for recall: json, concise, or markdown (default: json)
   --verbose                  Enable diagnostic step logs on stderr (stdout remains clean JSON)
   --trace-id <id>            Specify or propagate an explicit X-Trace-ID
   --timeout <duration>       Operation or probe timeout budget (e.g. 1500ms, 2s)
@@ -392,6 +407,57 @@ func outputError(traceID, message string) {
 		"trace_id": traceID,
 	})
 	os.Exit(1)
+}
+
+func setDoubleDashUsage(fs *flag.FlagSet) {
+	fs.SetOutput(os.Stdout)
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage of %s:\n", fs.Name())
+		fs.VisitAll(func(f *flag.Flag) {
+			s := fmt.Sprintf("  --%s", f.Name)
+			name, usage := flag.UnquoteUsage(f)
+			if len(name) > 0 {
+				s += " " + name
+			}
+			if len(s) <= 4 {
+				s += "\t"
+			} else {
+				s += "\n    \t"
+			}
+			s += strings.ReplaceAll(usage, "\n", "\n    \t")
+			if f.DefValue != "" && f.DefValue != "false" && f.DefValue != "0" {
+				s += fmt.Sprintf(" (default %s)", f.DefValue)
+			}
+			fmt.Fprintf(fs.Output(), "%s\n", s)
+		})
+	}
+}
+
+func validateFormat(raw string) (string, error) {
+	if raw == "" {
+		return "json", nil
+	}
+	f := strings.ToLower(strings.TrimSpace(raw))
+	switch f {
+	case "json", "concise", "markdown":
+		return f, nil
+	default:
+		return "", fmt.Errorf("invalid --format '%s': must be 'json', 'concise', or 'markdown'", raw)
+	}
+}
+
+func renderRecallOutput(w io.Writer, resp *model.RecallResponse, format string) error {
+	switch format {
+	case "concise", "markdown":
+		_, err := fmt.Fprintln(w, resp.FormatMarkdown())
+		return err
+	case "json", "":
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(resp)
+	default:
+		return fmt.Errorf("invalid --format '%s': must be 'json', 'concise', or 'markdown'", format)
+	}
 }
 
 func readInput(textFlag, fileFlag string) (string, error) {
@@ -541,6 +607,7 @@ func runFilter(global GlobalFlags, args []string) {
 // runRecall handles the 'recall' subcommand.
 func runRecall(global GlobalFlags, args []string) {
 	fs := flag.NewFlagSet("recall", flag.ExitOnError)
+	setDoubleDashUsage(fs)
 	queryFlag := fs.String("query", "", "Search query for associative knowledge recall")
 	topKFlag := fs.Int("top-k", 0, "Number of ranked nodes to retrieve")
 	alphaFlag := fs.Float64("alpha", 0.6, "Similarity weight")
@@ -559,6 +626,7 @@ func runRecall(global GlobalFlags, args []string) {
 	fs.Var(&anchorFlags, "a", "Target anchor tag alias")
 	anchorModeFlag := fs.String("anchor-mode", "boost", "Anchor recall mode: boost or filter (default: boost)")
 	includeEmbeddingsFlag := fs.Bool("include-embeddings", false, "Include vector embeddings in recall results (default: false)")
+	formatFlag := fs.String("format", "", "Output format: json, concise, or markdown (default: json)")
 	_ = fs.Parse(args)
 
 	verbose := global.Verbose || *verboseFlag
@@ -570,6 +638,15 @@ func runRecall(global GlobalFlags, args []string) {
 
 	if *queryFlag == "" {
 		outputError(traceID, "--query flag is required")
+	}
+
+	rawFormat := *formatFlag
+	if rawFormat == "" {
+		rawFormat = global.Format
+	}
+	format, err := validateFormat(rawFormat)
+	if err != nil {
+		outputError(traceID, err.Error())
 	}
 
 	anchors := model.ParseAnchors(append(global.Anchors, anchorFlags...)...)
@@ -628,7 +705,12 @@ func runRecall(global GlobalFlags, args []string) {
 		outputError(traceID, err.Error())
 	}
 
-	outputJSON(resp)
+	switch format {
+	case "concise", "markdown":
+		fmt.Println(resp.FormatMarkdown())
+	default:
+		outputJSON(resp)
+	}
 }
 
 // runDeliberate handles the 'deliberate' subcommand.
