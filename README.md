@@ -116,19 +116,79 @@ curl -fsSL https://raw.githubusercontent.com/Duara-Cortex/sekha-cluster-tool/mai
 
 All subcommands output **strict, formatted JSON to `stdout`**, allowing direct deserialisation by agent runtimes and test harnesses. Diagnostic step logs are routed to `stderr` when `--verbose` is specified.
 
-### 1. Cluster Status & Latency Probe (`status`)
-Checks reachability and response latency across configured cluster endpoints:
+### 1. Cluster Status & Terminal Dashboard (`status`)
+Probes all three cluster layers concurrently (500ms default timeout budget) and renders a human-readable ASCII dashboard by default:
 
 ```bash
 sekha-cluster-tool status
-# Or with explicit parameters:
-sekha-cluster-tool status \
-  --sensory-url "http://<sensory-node>:8081" \
-  --working-url "http://<working-node>:8083" \
-  --knowledge-url "http://<knowledge-node>:8084"
 ```
 
-### 2. Sensory Filtering (`filter`)
+**Terminal Dashboard Output:**
+```text
+======================================================================
+              Sekha Tri-Node Edge Cognitive Cluster Status            
+======================================================================
+Cluster State: ALL NODES HEALTHY (3/3 Online) | Trace ID: trc-abc123
+Config Source: /home/admin/.env
+
+[●] Node 3: Sensory Layer (http://192.168.8.183:8081)
+    • Status:       HEALTHY (9.8 ms)
+    • Buffer Usage: 10.3 MB / 64.0 MB (16.2% fill)
+    • Throughput:   50,386 ingested | 0 dropped
+    • Gating:       30,503 salient / 30,836 evaluated (1.1% noise reduced)
+
+[●] Node 2: Working Memory Layer (http://192.168.8.175:8083)
+    • Status:       HEALTHY (10.9 ms)
+    • SLM Engine:   REACHABLE (llama-server :8082)
+    • Service:      sekha-working-scratchpad (uptime: 4d 14h)
+
+[●] Node 1: Long-Term Knowledge Layer (http://192.168.8.213:8084)
+    • Status:       HEALTHY (10.4 ms)
+    • Graph Scale:  229 nodes | 882 relational edges
+    • Embedder:     REACHABLE (384-D :8086)
+    • Service:      sekha-knowledge-store (uptime: 1d 02h)
+======================================================================
+```
+
+If a node is offline or degraded, it displays `[✗] OFFLINE (<latency> ms)` with the exact connection error and sets cluster state to `DEGRADED (2/3 Online)`.
+
+**Machine JSON Output (`--json` or `--format json`):**
+```bash
+sekha-cluster-tool status --json
+```
+
+### 2. Preflight Connectivity Ping (`ping`)
+Lightweight preflight connectivity check across all three layers running concurrently. Exits with **code 0** if all nodes respond, or **code 1** if any node is unreachable:
+
+```bash
+sekha-cluster-tool ping
+```
+
+**Terminal Output:**
+```text
+[OK] Node 3 (Sensory)    - 9.8ms   (http://192.168.8.183:8081)
+[OK] Node 2 (Working)    - 11.2ms  (http://192.168.8.175:8083)
+[OK] Node 1 (Knowledge)  - 10.4ms  (http://192.168.8.213:8084)
+Cluster: HEALTHY (3/3 nodes online)
+```
+
+**JSON Output (`--json`):**
+```bash
+sekha-cluster-tool ping --json
+```
+```json
+{
+  "all_healthy": true,
+  "nodes": {
+    "sensory": { "reachable": true, "ping_ms": 9.8, "url": "http://192.168.8.183:8081" },
+    "working": { "reachable": true, "ping_ms": 11.2, "url": "http://192.168.8.175:8083" },
+    "knowledge": { "reachable": true, "ping_ms": 10.4, "url": "http://192.168.8.213:8084" }
+  },
+  "timestamp": "2026-09-24T18:50:00Z"
+}
+```
+
+### 3. Sensory Filtering (`filter`)
 Dispatches raw text or queries an in-memory buffer:
 
 ```bash
@@ -138,7 +198,7 @@ sekha-cluster-tool filter \
   --threshold 0.45
 ```
 
-### 3. Associative Recall (`recall`)
+### 4. Associative Recall (`recall`)
 Queries the relational knowledge graph for contextual entities (returns lean schema without embeddings by default):
 
 ```bash
@@ -150,7 +210,7 @@ sekha-cluster-tool recall \
   --include-embeddings
 ```
 
-### 4. Working Deliberation (`deliberate`)
+### 5. Working Deliberation (`deliberate`)
 Invokes the working memory scratchpad to formulate a reasoning step:
 
 ```bash
@@ -160,7 +220,7 @@ sekha-cluster-tool deliberate \
   --context "[policy: Thermal Policy] Threshold 70C triggers auxiliary fan override"
 ```
 
-### 5. Episodic Consolidation (`consolidate`)
+### 6. Episodic Consolidation (`consolidate`)
 Commits completed deliberation traces for background Hebbian reinforcement and decay.
 
 **Positional Shortcut (Quick Memorisation):**
@@ -191,7 +251,7 @@ sekha-cluster-tool consolidate \
   --sync
 ```
 
-### 6. Closed-Loop Cognitive Cycle (`orchestrate`)
+### 7. Closed-Loop Cognitive Cycle (`orchestrate`)
 Coordinates the entire 4-stage loop in a single command, collecting stage telemetry. Supports `--task` as an alias for `--directive`:
 
 ```bash
