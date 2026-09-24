@@ -200,6 +200,50 @@ func (r *RecallResponse) RenderMarkdown() string {
 	return r.FormatMarkdown()
 }
 
+// Filter filters response nodes by entity type and minimum score, and prunes orphaned relational edges.
+func (r *RecallResponse) Filter(entityType string, minScore float64) {
+	if r == nil {
+		return
+	}
+	targetType := strings.TrimSpace(entityType)
+	if targetType == "" && minScore <= 0 {
+		return
+	}
+
+	retainedNodes := make([]ScoredNode, 0, len(r.Nodes))
+	retainedIDs := make(map[string]bool, len(r.Nodes))
+
+	for _, node := range r.Nodes {
+		if targetType != "" && !strings.EqualFold(node.EntityType, targetType) {
+			continue
+		}
+		if minScore > 0 && node.Score < minScore {
+			continue
+		}
+		retainedNodes = append(retainedNodes, node)
+		retainedIDs[node.ID] = true
+	}
+	r.Nodes = retainedNodes
+
+	retainedEdges := make([]Edge, 0, len(r.Edges))
+	for _, edge := range r.Edges {
+		if retainedIDs[edge.SourceID] && retainedIDs[edge.TargetID] {
+			retainedEdges = append(retainedEdges, edge)
+		}
+	}
+	r.Edges = retainedEdges
+
+	if len(r.ProjectedNodes) > 0 {
+		retainedProjected := make([]map[string]any, 0, len(retainedNodes))
+		for _, m := range r.ProjectedNodes {
+			if idVal, ok := m["id"].(string); ok && retainedIDs[idVal] {
+				retainedProjected = append(retainedProjected, m)
+			}
+		}
+		r.ProjectedNodes = retainedProjected
+	}
+}
+
 // KnowledgeHealthResponse reports Node 1 operational status and graph sizing.
 type KnowledgeHealthResponse struct {
 	Status        string `json:"status"`

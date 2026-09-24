@@ -38,6 +38,8 @@ type GlobalFlags struct {
 	AnchorMode        string
 	IncludeEmbeddings bool
 	Format            string
+	EntityType        string
+	MinScore          float64
 }
 
 // anchorSliceFlag enables repeatable and comma-delimited string flags.
@@ -289,6 +291,36 @@ func parseArgs(rawArgs []string) (GlobalFlags, string, []string) {
 			continue
 		}
 
+		if m, val, inline := matchStringFlag(arg, "type", "t"); m {
+			if inline {
+				global.EntityType = val
+				i++
+			} else if i+1 < len(rawArgs) {
+				global.EntityType = rawArgs[i+1]
+				i += 2
+			} else {
+				i++
+			}
+			continue
+		}
+
+		if m, val, inline := matchStringFlag(arg, "min-score"); m {
+			var scoreStr string
+			if inline {
+				scoreStr = val
+				i++
+			} else if i+1 < len(rawArgs) {
+				scoreStr = rawArgs[i+1]
+				i += 2
+			} else {
+				i++
+			}
+			if s, err := strconv.ParseFloat(scoreStr, 64); err == nil {
+				global.MinScore = s
+			}
+			continue
+		}
+
 		if subcommand == "" && !strings.HasPrefix(arg, "-") {
 			subcommand = arg
 			i++
@@ -378,6 +410,8 @@ Global Flags:
   --anchor-mode <mode>       Anchor recall mode: boost or filter (default: boost)
   --include-embeddings       Include vector embeddings in recall responses (default: false)
   --format <format>          Output format for recall: json, concise, or markdown (default: json)
+  --type, -t <type>          Filter recall results by entity type
+  --min-score <score>        Minimum recall candidate score threshold (default: 0.0)
   --verbose                  Enable diagnostic step logs on stderr (stdout remains clean JSON)
   --trace-id <id>            Specify or propagate an explicit X-Trace-ID
   --timeout <duration>       Operation or probe timeout budget (e.g. 1500ms, 2s)
@@ -627,6 +661,9 @@ func runRecall(global GlobalFlags, args []string) {
 	anchorModeFlag := fs.String("anchor-mode", "boost", "Anchor recall mode: boost or filter (default: boost)")
 	includeEmbeddingsFlag := fs.Bool("include-embeddings", false, "Include vector embeddings in recall results (default: false)")
 	formatFlag := fs.String("format", "", "Output format: json, concise, or markdown (default: json)")
+	typeFlag := fs.String("type", "", "Filter recall results by entity type")
+	fs.StringVar(typeFlag, "t", "", "Filter recall results by entity type (alias)")
+	minScoreFlag := fs.Float64("min-score", 0.0, "Minimum recall candidate score threshold (default: 0.0)")
 	_ = fs.Parse(args)
 
 	verbose := global.Verbose || *verboseFlag
@@ -700,10 +737,21 @@ func runRecall(global GlobalFlags, args []string) {
 		IncludeEmbeddings: includeEmbeddings,
 	}
 
+	entityType := *typeFlag
+	if entityType == "" {
+		entityType = global.EntityType
+	}
+	minScore := *minScoreFlag
+	if minScore == 0.0 && global.MinScore > 0 {
+		minScore = global.MinScore
+	}
+
 	resp, err := knowledgeClient.Recall(ctx, req, traceID)
 	if err != nil {
 		outputError(traceID, err.Error())
 	}
+
+	resp.Filter(entityType, minScore)
 
 	switch format {
 	case "concise", "markdown":
