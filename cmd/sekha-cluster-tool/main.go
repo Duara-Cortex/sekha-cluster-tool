@@ -31,6 +31,10 @@ type GlobalFlags struct {
 	KnowledgeURL      string
 	OrchestrationURL  string
 	APIKey            string
+	TLSCACert         string
+	Insecure          bool
+	Secret            bool
+	AllowSecret       bool
 	TraceID           string
 	Verbose           bool
 	Timeout           time.Duration
@@ -210,7 +214,7 @@ func parseArgs(rawArgs []string) (GlobalFlags, string, []string) {
 			continue
 		}
 
-		if m, val, inline := matchStringFlag(arg, "api-key", "key"); m {
+		if m, val, inline := matchStringFlag(arg, "api-key", "key", "token"); m {
 			if inline {
 				global.APIKey = val
 				i++
@@ -220,6 +224,37 @@ func parseArgs(rawArgs []string) (GlobalFlags, string, []string) {
 			} else {
 				i++
 			}
+			continue
+		}
+
+		if m, val, inline := matchStringFlag(arg, "tls-ca-cert"); m {
+			if inline {
+				global.TLSCACert = val
+				i++
+			} else if i+1 < len(rawArgs) {
+				global.TLSCACert = rawArgs[i+1]
+				i += 2
+			} else {
+				i++
+			}
+			continue
+		}
+
+		if m, val, _ := matchBoolFlag(arg, "insecure"); m {
+			global.Insecure = val
+			i++
+			continue
+		}
+
+		if m, val, _ := matchBoolFlag(arg, "secret"); m {
+			global.Secret = val
+			i++
+			continue
+		}
+
+		if m, val, _ := matchBoolFlag(arg, "allow-secret"); m {
+			global.AllowSecret = val
+			i++
 			continue
 		}
 
@@ -415,7 +450,11 @@ Global Flags:
   --working-url <url>        Working memory scratchpad URL (legacy alias: --node2-url)
   --knowledge-url <url>      Knowledge store & recall URL (legacy alias: --node1-url)
   --orchestration-url <url>  Orchestration working memory URL alias
-  --api-key <key>            Node 1 API key for protected knowledge endpoints
+  --api-key, --token <key>   Node 1 API key for protected knowledge endpoints
+  --tls-ca-cert <path>       Custom root CA certificate file for cluster HTTPS
+  --insecure                 Skip TLS certificate verification (InsecureSkipVerify: true)
+  --secret                   Enforce payload encryption at rest (consolidate)
+  --allow-secret             Permit persisting raw credentials/secrets (consolidate)
   --anchor, -a <tag>         Target anchor tag (repeatable or comma-delimited, e.g. -a "#project:kestrel")
   --anchor-mode <mode>       Anchor recall mode: boost or filter (default: boost)
   --include-embeddings       Include vector embeddings in recall responses (default: false)
@@ -433,6 +472,8 @@ Environment Variables (.env / OS):
   CLUSTER_WORKING_URL    Working Scratchpad base URL (fallback: SEKHA_NODE2_URL)
   CLUSTER_KNOWLEDGE_URL  Knowledge Store base URL (fallback: SEKHA_NODE1_URL)
   CLUSTER_API_KEY        Node 1 API Key (fallback: SEKHA_API_KEY)
+  CLUSTER_TLS_CA_CERT    Custom root CA certificate path for HTTPS
+  CLUSTER_INSECURE       Skip TLS certificate verification (true/false)
 `, Version)
 }
 
@@ -445,13 +486,26 @@ func outputJSON(data interface{}) {
 	}
 }
 
+var osExit = os.Exit
+
+// Format401Diagnostic enriches HTTP 401 error messages with actionable operator advice.
+func Format401Diagnostic(message string) string {
+	if strings.Contains(message, "401") || strings.Contains(strings.ToLower(message), "unauthorized") {
+		if !strings.Contains(message, "CLUSTER_API_KEY") || !strings.Contains(message, "--token") {
+			return fmt.Sprintf("HTTP 401 Unauthorized: API key is invalid or missing. Check .env (CLUSTER_API_KEY / SEKHA_API_KEY) or pass --token (details: %s)", message)
+		}
+	}
+	return message
+}
+
 func outputError(traceID, message string) {
+	message = Format401Diagnostic(message)
 	outputJSON(map[string]interface{}{
 		"status":   "error",
 		"error":    message,
 		"trace_id": traceID,
 	})
-	os.Exit(1)
+	osExit(1)
 }
 
 func setDoubleDashUsage(fs *flag.FlagSet) {
@@ -581,6 +635,10 @@ func runEnv(global GlobalFlags, args []string) {
 		fs := flag.NewFlagSet("env show", flag.ExitOnError)
 		envFileFlag := fs.String("env-file", "", "Path to .env configuration file")
 		apiKeyFlag := fs.String("api-key", "", "API key for Node 1 authentication")
+		tokenFlag := fs.String("token", "", "Token alias for Node 1 authentication")
+		keyFlag := fs.String("key", "", "Legacy alias for API key")
+		tlsCACertFlag := fs.String("tls-ca-cert", "", "Path to custom root CA certificate")
+		insecureFlag := fs.Bool("insecure", false, "Skip TLS certificate verification")
 		_ = fs.Parse(actionArgs)
 
 		cfg, err := config.Load(config.FlagOverrides{
@@ -588,7 +646,9 @@ func runEnv(global GlobalFlags, args []string) {
 			SensoryURL:   global.SensoryURL,
 			WorkingURL:   global.WorkingURL,
 			KnowledgeURL: global.KnowledgeURL,
-			APIKey:       pickURL(*apiKeyFlag, global.APIKey),
+			APIKey:       pickURL(*apiKeyFlag, *tokenFlag, *keyFlag, global.APIKey),
+			TLSCACert:    pickURL(*tlsCACertFlag, global.TLSCACert),
+			Insecure:     *insecureFlag || global.Insecure,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
@@ -612,6 +672,11 @@ func runFilter(global GlobalFlags, args []string) {
 	fromBufferFlag := fs.Bool("from-buffer", false, "Filter directly from in-memory ring buffer")
 	sensoryURLFlag := fs.String("sensory-url", "", "Sensory filter endpoint URL")
 	node3URLFlag := fs.String("node3-url", "", "Legacy alias for --sensory-url")
+	apiKeyFlag := fs.String("api-key", "", "API key for cluster authentication")
+	tokenFlag := fs.String("token", "", "Token alias for cluster authentication")
+	keyFlag := fs.String("key", "", "Legacy alias for API key")
+	tlsCACertFlag := fs.String("tls-ca-cert", "", "Path to custom root CA certificate")
+	insecureFlag := fs.Bool("insecure", false, "Skip TLS certificate verification")
 	envFileFlag := fs.String("env-file", "", "Path to .env configuration file")
 	timeoutFlag := fs.Duration("timeout", 0, "Operation timeout budget")
 	traceIDFlag := fs.String("trace-id", "", "Distributed trace ID")
@@ -633,7 +698,9 @@ func runFilter(global GlobalFlags, args []string) {
 	cfg, err := config.Load(config.FlagOverrides{
 		EnvPath:           pickURL(*envFileFlag, global.EnvPath),
 		SensoryURL:        pickURL(*sensoryURLFlag, *node3URLFlag, global.SensoryURL),
-		APIKey:            pickURL(global.APIKey),
+		APIKey:            pickURL(*apiKeyFlag, *tokenFlag, *keyFlag, global.APIKey),
+		TLSCACert:         pickURL(*tlsCACertFlag, global.TLSCACert),
+		Insecure:          *insecureFlag || global.Insecure,
 		Timeout:           timeout,
 		SalienceThreshold: *thresholdFlag,
 	})
@@ -654,7 +721,7 @@ func runFilter(global GlobalFlags, args []string) {
 		outputError(traceID, "Must provide either --text, --file, or --from-buffer")
 	}
 
-	sensoryClient := client.NewSensoryClient(cfg.SensoryURL, cfg.DefaultTimeout)
+	sensoryClient := client.NewSensoryClient(cfg.SensoryURL, cfg.DefaultTimeout, cfg.TLSCACert, cfg.Insecure)
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.DefaultTimeout)
 	defer cancel()
 
@@ -686,6 +753,10 @@ func runRecall(global GlobalFlags, args []string) {
 	knowledgeURLFlag := fs.String("knowledge-url", "", "Knowledge store endpoint URL")
 	node1URLFlag := fs.String("node1-url", "", "Legacy alias for --knowledge-url")
 	apiKeyFlag := fs.String("api-key", "", "API key for Node 1 authentication")
+	tokenFlag := fs.String("token", "", "Token alias for Node 1 authentication")
+	keyFlag := fs.String("key", "", "Legacy alias for API key")
+	tlsCACertFlag := fs.String("tls-ca-cert", "", "Path to custom root CA certificate")
+	insecureFlag := fs.Bool("insecure", false, "Skip TLS certificate verification")
 	envFileFlag := fs.String("env-file", "", "Path to .env configuration file")
 	timeoutFlag := fs.Duration("timeout", 0, "Operation timeout budget")
 	traceIDFlag := fs.String("trace-id", "", "Distributed trace ID")
@@ -744,7 +815,9 @@ func runRecall(global GlobalFlags, args []string) {
 	cfg, err := config.Load(config.FlagOverrides{
 		EnvPath:      pickURL(*envFileFlag, global.EnvPath),
 		KnowledgeURL: pickURL(*knowledgeURLFlag, *node1URLFlag, global.KnowledgeURL),
-		APIKey:       pickURL(*apiKeyFlag, global.APIKey),
+		APIKey:       pickURL(*apiKeyFlag, *tokenFlag, *keyFlag, global.APIKey),
+		TLSCACert:    pickURL(*tlsCACertFlag, global.TLSCACert),
+		Insecure:     *insecureFlag || global.Insecure,
 		Timeout:      timeout,
 		RecallTopK:   *topKFlag,
 	})
@@ -756,7 +829,7 @@ func runRecall(global GlobalFlags, args []string) {
 		outputError(traceID, err.Error())
 	}
 
-	knowledgeClient := client.NewKnowledgeClient(cfg.KnowledgeURL, cfg.DefaultTimeout, cfg.APIKey)
+	knowledgeClient := client.NewKnowledgeClient(cfg.KnowledgeURL, cfg.DefaultTimeout, cfg.APIKey, cfg.TLSCACert, cfg.Insecure)
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.DefaultTimeout)
 	defer cancel()
 
@@ -808,6 +881,11 @@ func runDeliberate(global GlobalFlags, args []string) {
 	workingURLFlag := fs.String("working-url", "", "Working memory scratchpad endpoint URL")
 	node2URLFlag := fs.String("node2-url", "", "Legacy alias for --working-url")
 	orchestrationURLFlag := fs.String("orchestration-url", "", "Alias for working memory URL")
+	apiKeyFlag := fs.String("api-key", "", "API key for cluster authentication")
+	tokenFlag := fs.String("token", "", "Token alias for cluster authentication")
+	keyFlag := fs.String("key", "", "Legacy alias for API key")
+	tlsCACertFlag := fs.String("tls-ca-cert", "", "Path to custom root CA certificate")
+	insecureFlag := fs.Bool("insecure", false, "Skip TLS certificate verification")
 	envFileFlag := fs.String("env-file", "", "Path to .env configuration file")
 	timeoutFlag := fs.Duration("timeout", 0, "Operation timeout budget")
 	traceIDFlag := fs.String("trace-id", "", "Distributed trace ID")
@@ -834,7 +912,9 @@ func runDeliberate(global GlobalFlags, args []string) {
 		EnvPath:           pickURL(*envFileFlag, global.EnvPath),
 		WorkingURL:        pickURL(*workingURLFlag, *node2URLFlag, *orchestrationURLFlag, global.WorkingURL, global.OrchestrationURL),
 		OrchestrationURL:  pickURL(*orchestrationURLFlag, global.OrchestrationURL),
-		APIKey:            pickURL(global.APIKey),
+		APIKey:            pickURL(*apiKeyFlag, *tokenFlag, *keyFlag, global.APIKey),
+		TLSCACert:         pickURL(*tlsCACertFlag, global.TLSCACert),
+		Insecure:          *insecureFlag || global.Insecure,
 		DeliberateTimeout: timeout,
 	})
 	if err != nil {
@@ -876,7 +956,7 @@ func runDeliberate(global GlobalFlags, args []string) {
 		}
 	}
 
-	workingClient := client.NewWorkingClient(cfg.WorkingURL, cfg.DeliberateTimeout)
+	workingClient := client.NewWorkingClient(cfg.WorkingURL, cfg.DeliberateTimeout, cfg.TLSCACert, cfg.Insecure)
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.DeliberateTimeout)
 	defer cancel()
 
@@ -914,9 +994,15 @@ func runConsolidate(global GlobalFlags, args []string) {
 	goalFlag := fs.String("goal", "", "Task goal description")
 	outcomeFlag := fs.String("outcome", "success", "Outcome: success or failure")
 	syncFlag := fs.Bool("sync", false, "Execute synchronous consolidation cycle")
+	secretFlag := fs.Bool("secret", false, "Mark consolidated trace as secret/encrypted at rest")
+	allowSecretFlag := fs.Bool("allow-secret", false, "Confirm persistence of detected raw credentials")
 	knowledgeURLFlag := fs.String("knowledge-url", "", "Knowledge store endpoint URL")
 	node1URLFlag := fs.String("node1-url", "", "Legacy alias for --knowledge-url")
 	apiKeyFlag := fs.String("api-key", "", "API key for Node 1 authentication")
+	tokenFlag := fs.String("token", "", "Token alias for Node 1 authentication")
+	keyFlag := fs.String("key", "", "Legacy alias for API key")
+	tlsCACertFlag := fs.String("tls-ca-cert", "", "Path to custom root CA certificate")
+	insecureFlag := fs.Bool("insecure", false, "Skip TLS certificate verification")
 	envFileFlag := fs.String("env-file", "", "Path to .env configuration file")
 	timeoutFlag := fs.Duration("timeout", 0, "Operation timeout budget")
 	traceIDFlag := fs.String("trace-id", "", "Distributed trace ID")
@@ -944,7 +1030,9 @@ func runConsolidate(global GlobalFlags, args []string) {
 	cfg, err := config.Load(config.FlagOverrides{
 		EnvPath:      pickURL(*envFileFlag, global.EnvPath),
 		KnowledgeURL: pickURL(*knowledgeURLFlag, *node1URLFlag, global.KnowledgeURL),
-		APIKey:       pickURL(*apiKeyFlag, global.APIKey),
+		APIKey:       pickURL(*apiKeyFlag, *tokenFlag, *keyFlag, global.APIKey),
+		TLSCACert:    pickURL(*tlsCACertFlag, global.TLSCACert),
+		Insecure:     *insecureFlag || global.Insecure,
 		Timeout:      timeout,
 	})
 	if err != nil {
@@ -955,19 +1043,19 @@ func runConsolidate(global GlobalFlags, args []string) {
 		outputError(traceID, err.Error())
 	}
 
+	var traceContent []byte
 	var req model.ConsolidateRequest
 	if *traceJSONFlag != "" {
-		var content []byte
 		var err error
 		if strings.HasPrefix(strings.TrimSpace(*traceJSONFlag), "{") {
-			content = []byte(*traceJSONFlag)
+			traceContent = []byte(*traceJSONFlag)
 		} else {
-			content, err = os.ReadFile(*traceJSONFlag)
+			traceContent, err = os.ReadFile(*traceJSONFlag)
 			if err != nil {
 				outputError(traceID, fmt.Sprintf("Error reading trace file: %v", err))
 			}
 		}
-		if err := json.Unmarshal(content, &req); err != nil {
+		if err := json.Unmarshal(traceContent, &req); err != nil {
 			outputError(traceID, fmt.Sprintf("Error unmarshalling trace JSON: %v", err))
 		}
 
@@ -1024,7 +1112,34 @@ func runConsolidate(global GlobalFlags, args []string) {
 		req.TraceID = traceID
 	}
 
-	knowledgeClient := client.NewKnowledgeClient(cfg.KnowledgeURL, cfg.DefaultTimeout, cfg.APIKey)
+	allowSecret := *allowSecretFlag || global.AllowSecret
+	isSecret := *secretFlag || global.Secret
+
+	// Credential persistence safeguards: detect raw secrets in arguments, trace content, or request fields
+	var textsToScan []string
+	textsToScan = append(textsToScan, positionalArgs...)
+	if *traceJSONFlag != "" {
+		textsToScan = append(textsToScan, *traceJSONFlag)
+		if len(traceContent) > 0 {
+			textsToScan = append(textsToScan, string(traceContent))
+		}
+	}
+
+	detected, secretType := model.DetectRawSecretsInStrings(textsToScan...)
+	if !detected {
+		detected, secretType = req.DetectSecrets()
+	}
+
+	if detected {
+		if !allowSecret {
+			outputError(traceID, fmt.Sprintf("raw credentials detected (%s) in consolidation payload; persistence rejected. Use external references (e.g. vault:// or env://) or pass --allow-secret to confirm encryption at rest", secretType))
+		}
+		req.IsSecret = true
+	} else if isSecret || allowSecret {
+		req.IsSecret = true
+	}
+
+	knowledgeClient := client.NewKnowledgeClient(cfg.KnowledgeURL, cfg.DefaultTimeout, cfg.APIKey, cfg.TLSCACert, cfg.Insecure)
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.DefaultTimeout)
 	defer cancel()
 
@@ -1053,6 +1168,10 @@ func runOrchestrate(global GlobalFlags, args []string) {
 	workingURLFlag := fs.String("working-url", "", "Working memory scratchpad endpoint URL")
 	knowledgeURLFlag := fs.String("knowledge-url", "", "Knowledge store endpoint URL")
 	apiKeyFlag := fs.String("api-key", "", "API key for Node 1 authentication")
+	tokenFlag := fs.String("token", "", "Token alias for Node 1 authentication")
+	keyFlag := fs.String("key", "", "Legacy alias for API key")
+	tlsCACertFlag := fs.String("tls-ca-cert", "", "Path to custom root CA certificate")
+	insecureFlag := fs.Bool("insecure", false, "Skip TLS certificate verification")
 	node3URLFlag := fs.String("node3-url", "", "Legacy alias for --sensory-url")
 	node2URLFlag := fs.String("node2-url", "", "Legacy alias for --working-url")
 	node1URLFlag := fs.String("node1-url", "", "Legacy alias for --knowledge-url")
@@ -1097,7 +1216,9 @@ func runOrchestrate(global GlobalFlags, args []string) {
 		WorkingURL:        pickURL(*workingURLFlag, *node2URLFlag, *orchestrationURLFlag, global.WorkingURL, global.OrchestrationURL),
 		KnowledgeURL:      pickURL(*knowledgeURLFlag, *node1URLFlag, global.KnowledgeURL),
 		OrchestrationURL:  pickURL(*orchestrationURLFlag, global.OrchestrationURL),
-		APIKey:            pickURL(*apiKeyFlag, global.APIKey),
+		APIKey:            pickURL(*apiKeyFlag, *tokenFlag, *keyFlag, global.APIKey),
+		TLSCACert:         pickURL(*tlsCACertFlag, global.TLSCACert),
+		Insecure:          *insecureFlag || global.Insecure,
 		Timeout:           timeout,
 		SalienceThreshold: *thresholdFlag,
 		RecallTopK:        *topKFlag,
@@ -1156,6 +1277,10 @@ func runStatus(global GlobalFlags, args []string) int {
 	workingURLFlag := fs.String("working-url", "", "Working memory scratchpad endpoint URL")
 	knowledgeURLFlag := fs.String("knowledge-url", "", "Knowledge store endpoint URL")
 	apiKeyFlag := fs.String("api-key", "", "API key for Node 1 authentication")
+	tokenFlag := fs.String("token", "", "Token alias for Node 1 authentication")
+	keyFlag := fs.String("key", "", "Legacy alias for API key")
+	tlsCACertFlag := fs.String("tls-ca-cert", "", "Path to custom root CA certificate")
+	insecureFlag := fs.Bool("insecure", false, "Skip TLS certificate verification")
 	node3URLFlag := fs.String("node3-url", "", "Legacy alias for --sensory-url")
 	node2URLFlag := fs.String("node2-url", "", "Legacy alias for --working-url")
 	node1URLFlag := fs.String("node1-url", "", "Legacy alias for --knowledge-url")
@@ -1186,7 +1311,9 @@ func runStatus(global GlobalFlags, args []string) int {
 		WorkingURL:       pickURL(*workingURLFlag, *node2URLFlag, *orchestrationURLFlag, global.WorkingURL, global.OrchestrationURL),
 		KnowledgeURL:     pickURL(*knowledgeURLFlag, *node1URLFlag, global.KnowledgeURL),
 		OrchestrationURL: pickURL(*orchestrationURLFlag, global.OrchestrationURL),
-		APIKey:           pickURL(*apiKeyFlag, global.APIKey),
+		APIKey:           pickURL(*apiKeyFlag, *tokenFlag, *keyFlag, global.APIKey),
+		TLSCACert:        pickURL(*tlsCACertFlag, global.TLSCACert),
+		Insecure:         *insecureFlag || global.Insecure,
 		Timeout:          timeout,
 	})
 	if err != nil {
@@ -1212,6 +1339,10 @@ func runPing(global GlobalFlags, args []string) int {
 	workingURLFlag := fs.String("working-url", "", "Working memory scratchpad endpoint URL")
 	knowledgeURLFlag := fs.String("knowledge-url", "", "Knowledge store endpoint URL")
 	apiKeyFlag := fs.String("api-key", "", "API key for Node 1 authentication")
+	tokenFlag := fs.String("token", "", "Token alias for Node 1 authentication")
+	keyFlag := fs.String("key", "", "Legacy alias for API key")
+	tlsCACertFlag := fs.String("tls-ca-cert", "", "Path to custom root CA certificate")
+	insecureFlag := fs.Bool("insecure", false, "Skip TLS certificate verification")
 	node3URLFlag := fs.String("node3-url", "", "Legacy alias for --sensory-url")
 	node2URLFlag := fs.String("node2-url", "", "Legacy alias for --working-url")
 	node1URLFlag := fs.String("node1-url", "", "Legacy alias for --knowledge-url")
@@ -1242,7 +1373,9 @@ func runPing(global GlobalFlags, args []string) int {
 		WorkingURL:       pickURL(*workingURLFlag, *node2URLFlag, *orchestrationURLFlag, global.WorkingURL, global.OrchestrationURL),
 		KnowledgeURL:     pickURL(*knowledgeURLFlag, *node1URLFlag, global.KnowledgeURL),
 		OrchestrationURL: pickURL(*orchestrationURLFlag, global.OrchestrationURL),
-		APIKey:           pickURL(*apiKeyFlag, global.APIKey),
+		APIKey:           pickURL(*apiKeyFlag, *tokenFlag, *keyFlag, global.APIKey),
+		TLSCACert:        pickURL(*tlsCACertFlag, global.TLSCACert),
+		Insecure:         *insecureFlag || global.Insecure,
 		Timeout:          timeout,
 	})
 	if err != nil {

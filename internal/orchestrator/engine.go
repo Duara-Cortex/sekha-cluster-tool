@@ -22,9 +22,9 @@ type Orchestrator struct {
 func NewOrchestrator(cfg client.Config) *Orchestrator {
 	return &Orchestrator{
 		cfg:       cfg,
-		sensory:   client.NewSensoryClient(cfg.SensoryURL, cfg.DefaultTimeout),
-		working:   client.NewWorkingClient(cfg.WorkingURL, cfg.DeliberateTimeout),
-		knowledge: client.NewKnowledgeClient(cfg.KnowledgeURL, cfg.DefaultTimeout, cfg.APIKey),
+		sensory:   client.NewSensoryClient(cfg.SensoryURL, cfg.DefaultTimeout, cfg.TLSCACert, cfg.Insecure),
+		working:   client.NewWorkingClient(cfg.WorkingURL, cfg.DeliberateTimeout, cfg.TLSCACert, cfg.Insecure),
+		knowledge: client.NewKnowledgeClient(cfg.KnowledgeURL, cfg.DefaultTimeout, cfg.APIKey, cfg.TLSCACert, cfg.Insecure),
 	}
 }
 

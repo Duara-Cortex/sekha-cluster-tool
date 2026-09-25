@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,6 +26,10 @@ func TestParseArgs_FlagPositions(t *testing.T) {
 		expectedWorking           string
 		expectedKnowledge         string
 		expectedAPIKey            string
+		expectedTLSCACert         string
+		expectedInsecure          bool
+		expectedSecret            bool
+		expectedAllowSecret       bool
 		expectedVerbose           bool
 		expectedTimeout           time.Duration
 		expectedAnchors           []string
@@ -224,6 +230,36 @@ func TestParseArgs_FlagPositions(t *testing.T) {
 			expectedJSON:       true,
 			expectedArgs:       []string{},
 		},
+		{
+			name:               "token flag before subcommand",
+			args:               []string{"--token", "my-cluster-token-123", "status"},
+			expectedSubcommand: "status",
+			expectedAPIKey:     "my-cluster-token-123",
+			expectedArgs:       []string{},
+		},
+		{
+			name:               "token flag after subcommand inline",
+			args:               []string{"recall", "--token=inline-tok-456", "--query", "policy"},
+			expectedSubcommand: "recall",
+			expectedAPIKey:     "inline-tok-456",
+			expectedArgs:       []string{"--query", "policy"},
+		},
+		{
+			name:               "tls ca cert and insecure flags",
+			args:               []string{"--tls-ca-cert", "/etc/ssl/ca.crt", "--insecure", "status"},
+			expectedSubcommand: "status",
+			expectedTLSCACert:  "/etc/ssl/ca.crt",
+			expectedInsecure:   true,
+			expectedArgs:       []string{},
+		},
+		{
+			name:                "secret and allow-secret flags",
+			args:                []string{"consolidate", "Title", "Text", "--secret", "--allow-secret"},
+			expectedSubcommand:  "consolidate",
+			expectedSecret:      true,
+			expectedAllowSecret: true,
+			expectedArgs:        []string{"Title", "Text"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -244,6 +280,18 @@ func TestParseArgs_FlagPositions(t *testing.T) {
 			}
 			if global.APIKey != tt.expectedAPIKey {
 				t.Errorf("expected APIKey '%s', got '%s'", tt.expectedAPIKey, global.APIKey)
+			}
+			if global.TLSCACert != tt.expectedTLSCACert {
+				t.Errorf("expected TLSCACert '%s', got '%s'", tt.expectedTLSCACert, global.TLSCACert)
+			}
+			if global.Insecure != tt.expectedInsecure {
+				t.Errorf("expected Insecure %v, got %v", tt.expectedInsecure, global.Insecure)
+			}
+			if global.Secret != tt.expectedSecret {
+				t.Errorf("expected Secret %v, got %v", tt.expectedSecret, global.Secret)
+			}
+			if global.AllowSecret != tt.expectedAllowSecret {
+				t.Errorf("expected AllowSecret %v, got %v", tt.expectedAllowSecret, global.AllowSecret)
 			}
 			if global.Verbose != tt.expectedVerbose {
 				t.Errorf("expected Verbose %v, got %v", tt.expectedVerbose, global.Verbose)
@@ -1310,6 +1358,302 @@ func TestRunPing_ConcurrentExecution(t *testing.T) {
 		t.Errorf("expected parallel execution (< 450ms), took %v", elapsed)
 	}
 }
+
+func captureOutputWithExit(f func()) (out string, exitCode int) {
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	oldExit := osExit
+	defer func() {
+		osExit = oldExit
+	}()
+
+	var code int
+	osExit = func(c int) {
+		code = c
+		panic("exit")
+	}
+
+	done := make(chan string)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		done <- buf.String()
+	}()
+
+	func() {
+		defer func() {
+			_ = recover()
+		}()
+		f()
+	}()
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+	out = <-done
+	return out, code
+}
+
+func TestTokenFlag_Subcommands(t *testing.T) {
+	var mu sync.Mutex
+	var capturedAuthHeader string
+	var filterCalled bool
+	var deliberateCalled bool
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		if auth := r.Header.Get("Authorization"); auth != "" {
+			capturedAuthHeader = auth
+		}
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "filter") {
+			filterCalled = true
+			_, _ = w.Write([]byte(`{"chunks":[],"total_chunks":0,"salient_chunks":0}`))
+		} else if strings.Contains(r.URL.Path, "recall") {
+			_, _ = w.Write([]byte(`{"nodes":[],"edges":[],"query_latency_ms":0.5}`))
+		} else if strings.Contains(r.URL.Path, "deliberate") {
+			deliberateCalled = true
+			_, _ = w.Write([]byte(`{"step_index":0,"thought":"ok","proposed_action":"NONE","is_complete":true}`))
+		} else if strings.Contains(r.URL.Path, "consolidate") {
+			_, _ = w.Write([]byte(`{"status":"success","trace_id":"trc-1"}`))
+		} else {
+			_, _ = w.Write([]byte(`{"status":"healthy"}`))
+		}
+	}))
+	defer mockServer.Close()
+
+	t.Run("filter with --token flag", func(t *testing.T) {
+		filterCalled = false
+		global := GlobalFlags{SensoryURL: mockServer.URL}
+		captureStdout(func() {
+			runFilter(global, []string{"--text", "sample log stream", "--token", "tok-filter-001"})
+		})
+		if !filterCalled {
+			t.Errorf("expected filter request to succeed with --token flag")
+		}
+	})
+
+	t.Run("recall with --token flag", func(t *testing.T) {
+		mu.Lock()
+		capturedAuthHeader = ""
+		mu.Unlock()
+		global := GlobalFlags{KnowledgeURL: mockServer.URL}
+		captureStdout(func() {
+			runRecall(global, []string{"--query", "port", "--token", "tok-recall-123"})
+		})
+		expected := "Bearer tok-recall-123"
+		mu.Lock()
+		actual := capturedAuthHeader
+		mu.Unlock()
+		if actual != expected {
+			t.Errorf("expected Authorization '%s', got '%s'", expected, actual)
+		}
+	})
+
+	t.Run("deliberate with --token flag", func(t *testing.T) {
+		deliberateCalled = false
+		global := GlobalFlags{WorkingURL: mockServer.URL}
+		captureStdout(func() {
+			runDeliberate(global, []string{"--task", "test objective", "--token", "tok-delib-321"})
+		})
+		if !deliberateCalled {
+			t.Errorf("expected deliberate request to succeed with --token flag")
+		}
+	})
+
+	t.Run("consolidate with --token flag", func(t *testing.T) {
+		mu.Lock()
+		capturedAuthHeader = ""
+		mu.Unlock()
+		global := GlobalFlags{KnowledgeURL: mockServer.URL}
+		captureStdout(func() {
+			runConsolidate(global, []string{"Topic", "Detail", "--token", "tok-consolidate-456"})
+		})
+		expected := "Bearer tok-consolidate-456"
+		mu.Lock()
+		actual := capturedAuthHeader
+		mu.Unlock()
+		if actual != expected {
+			t.Errorf("expected Authorization '%s', got '%s'", expected, actual)
+		}
+	})
+
+	t.Run("status with --token flag", func(t *testing.T) {
+		mu.Lock()
+		capturedAuthHeader = ""
+		mu.Unlock()
+		global := GlobalFlags{
+			SensoryURL:   mockServer.URL,
+			WorkingURL:   mockServer.URL,
+			KnowledgeURL: mockServer.URL,
+		}
+		captureStdout(func() {
+			runStatus(global, []string{"--token", "tok-status-789", "--json"})
+		})
+		expected := "Bearer tok-status-789"
+		mu.Lock()
+		actual := capturedAuthHeader
+		mu.Unlock()
+		if actual != expected {
+			t.Errorf("expected Authorization '%s', got '%s'", expected, actual)
+		}
+	})
+}
+
+func TestRunConsolidate_SecretFlag(t *testing.T) {
+	var capturedReq model.ConsolidateRequest
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedReq = model.ConsolidateRequest{}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &capturedReq)
+
+		resp := model.ConsolidateResponse{
+			Status:  "success",
+			TraceID: r.Header.Get("X-Trace-ID"),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer mockServer.Close()
+
+	global := GlobalFlags{
+		KnowledgeURL: mockServer.URL,
+	}
+
+	// 1. With --secret flag
+	capturedReq = model.ConsolidateRequest{}
+	captureStdout(func() {
+		runConsolidate(global, []string{"Secret Doc", "Standard non-secret payload", "--secret"})
+	})
+	if !capturedReq.IsSecret {
+		t.Errorf("expected IsSecret true when --secret passed, got false")
+	}
+
+	// 2. Without --secret flag on clean payload
+	capturedReq = model.ConsolidateRequest{}
+	captureStdout(func() {
+		runConsolidate(global, []string{"Normal Doc", "Standard non-secret payload"})
+	})
+	if capturedReq.IsSecret {
+		t.Errorf("expected IsSecret false when --secret omitted, got true")
+	}
+}
+
+func TestRunConsolidate_SecretSafeguards(t *testing.T) {
+	var capturedReq model.ConsolidateRequest
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &capturedReq)
+
+		resp := model.ConsolidateResponse{
+			Status:  "success",
+			TraceID: r.Header.Get("X-Trace-ID"),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer mockServer.Close()
+
+	global := GlobalFlags{
+		KnowledgeURL: mockServer.URL,
+	}
+
+	t.Run("aborts when raw secret in positional args and --allow-secret omitted", func(t *testing.T) {
+		out, exitCode := captureOutputWithExit(func() {
+			runConsolidate(global, []string{"Leaked Key", "api_key=sk-proj-123456789012345678901234567890"})
+		})
+		if exitCode != 1 {
+			t.Errorf("expected exit code 1, got %d", exitCode)
+		}
+		if !strings.Contains(out, "raw credentials detected") {
+			t.Errorf("expected output to mention raw credentials detected, got: %s", out)
+		}
+		if !strings.Contains(out, "--allow-secret") {
+			t.Errorf("expected output to mention --allow-secret, got: %s", out)
+		}
+		if !strings.Contains(out, "vault://") || !strings.Contains(out, "env://") {
+			t.Errorf("expected output to suggest vault:// or env://, got: %s", out)
+		}
+	})
+
+	t.Run("aborts when RSA private key in trace file and --allow-secret omitted", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		traceFile := filepath.Join(tmpDir, "trace.json")
+		reqJSON := `{"task_goal":"Test Goal","sensory_context":[{"text":"-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----"}]}`
+		_ = os.WriteFile(traceFile, []byte(reqJSON), 0644)
+
+		out, exitCode := captureOutputWithExit(func() {
+			runConsolidate(global, []string{"--trace", traceFile})
+		})
+		if exitCode != 1 {
+			t.Errorf("expected exit code 1, got %d", exitCode)
+		}
+		if !strings.Contains(out, "raw credentials detected") {
+			t.Errorf("expected raw credentials error, got: %s", out)
+		}
+	})
+
+	t.Run("succeeds and enforces is_secret: true when --allow-secret provided", func(t *testing.T) {
+		capturedReq = model.ConsolidateRequest{}
+		out, exitCode := captureOutputWithExit(func() {
+			runConsolidate(global, []string{"Permitted", "api_key=sk-proj-123456789012345678901234567890", "--allow-secret"})
+		})
+		if exitCode != 0 {
+			t.Fatalf("expected successful execution with --allow-secret, got exit code %d, output: %s", exitCode, out)
+		}
+		if !capturedReq.IsSecret {
+			t.Errorf("expected IsSecret true when raw secret confirmed with --allow-secret, got false")
+		}
+	})
+
+	t.Run("succeeds without --allow-secret when using external references", func(t *testing.T) {
+		capturedReq = model.ConsolidateRequest{}
+		out, exitCode := captureOutputWithExit(func() {
+			runConsolidate(global, []string{"Vault Reference", "Loaded secret from vault://secrets/kestrel-api and env://CLUSTER_KEY"})
+		})
+		if exitCode != 0 {
+			t.Fatalf("expected successful execution for external references, got exit code %d, output: %s", exitCode, out)
+		}
+		if capturedReq.IsSecret {
+			t.Errorf("expected IsSecret false when external references used without --secret, got true")
+		}
+	})
+}
+
+func TestFormat401Diagnostic(t *testing.T) {
+	t.Run("enriches 401 error message", func(t *testing.T) {
+		rawErr := "server returned error HTTP 401 from http://node1:8084: unauthorized"
+		msg := Format401Diagnostic(rawErr)
+		if !strings.Contains(msg, "HTTP 401 Unauthorized") {
+			t.Errorf("expected 'HTTP 401 Unauthorized' in diagnostic, got: %s", msg)
+		}
+		if !strings.Contains(msg, "CLUSTER_API_KEY") || !strings.Contains(msg, "SEKHA_API_KEY") {
+			t.Errorf("expected .env suggestion in diagnostic, got: %s", msg)
+		}
+		if !strings.Contains(msg, "--token") {
+			t.Errorf("expected --token suggestion in diagnostic, got: %s", msg)
+		}
+	})
+
+	t.Run("leaves non-401 error unchanged", func(t *testing.T) {
+		rawErr := "server returned error HTTP 500 from http://node1:8084: internal server error"
+		msg := Format401Diagnostic(rawErr)
+		if msg != rawErr {
+			t.Errorf("expected message to remain '%s', got '%s'", rawErr, msg)
+		}
+	})
+
+	t.Run("does not duplicate hints if already present", func(t *testing.T) {
+		alreadyEnriched := "HTTP 401 Unauthorized: API key is invalid or missing. Check .env (CLUSTER_API_KEY / SEKHA_API_KEY) or pass --token"
+		msg := Format401Diagnostic(alreadyEnriched)
+		if msg != alreadyEnriched {
+			t.Errorf("expected unchanged message, got: %s", msg)
+		}
+	})
+}
+
 
 
 

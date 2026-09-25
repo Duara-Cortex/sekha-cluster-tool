@@ -70,7 +70,7 @@ func ProbeClusterHealth(ctx context.Context, cfg Config, timeout time.Duration, 
 			}
 			return
 		}
-		sClient := NewSensoryClient(cfg.SensoryURL, timeout)
+		sClient := NewSensoryClient(cfg.SensoryURL, timeout, cfg.TLSCACert, cfg.Insecure)
 		t0 := time.Now()
 		cCtx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
@@ -113,7 +113,7 @@ func ProbeClusterHealth(ctx context.Context, cfg Config, timeout time.Duration, 
 			}
 			return
 		}
-		wClient := NewWorkingClient(cfg.WorkingURL, timeout)
+		wClient := NewWorkingClient(cfg.WorkingURL, timeout, cfg.TLSCACert, cfg.Insecure)
 		t0 := time.Now()
 		cCtx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
@@ -156,7 +156,7 @@ func ProbeClusterHealth(ctx context.Context, cfg Config, timeout time.Duration, 
 			}
 			return
 		}
-		kClient := NewKnowledgeClient(cfg.KnowledgeURL, timeout, cfg.APIKey)
+		kClient := NewKnowledgeClient(cfg.KnowledgeURL, timeout, cfg.APIKey, cfg.TLSCACert, cfg.Insecure)
 		t0 := time.Now()
 		cCtx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()

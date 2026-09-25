@@ -301,3 +301,75 @@ func TestConfig_ResolveEnvPath_ExecutableDir(t *testing.T) {
 		}
 	}
 }
+
+func TestConfig_TLSConfiguration(t *testing.T) {
+	// Clean environment
+	os.Unsetenv("CLUSTER_TLS_CA_CERT")
+	os.Unsetenv("CLUSTER_INSECURE")
+
+	// 1. Defaults are empty/false
+	cfg, err := Load(FlagOverrides{})
+	if err != nil {
+		t.Fatalf("unexpected error loading blank config: %v", err)
+	}
+	if cfg.TLSCACert != "" {
+		t.Errorf("expected empty TLSCACert by default, got '%s'", cfg.TLSCACert)
+	}
+	if cfg.Insecure {
+		t.Errorf("expected Insecure to be false by default, got true")
+	}
+
+	// 2. From .env file
+	tmpDir := t.TempDir()
+	envPath := filepath.Join(tmpDir, ".env")
+	envContent := `CLUSTER_TLS_CA_CERT=/etc/ssl/cluster-ca.crt
+CLUSTER_INSECURE=true
+`
+	if err := os.WriteFile(envPath, []byte(envContent), 0644); err != nil {
+		t.Fatalf("failed to write test .env file: %v", err)
+	}
+
+	cfg, err = Load(FlagOverrides{EnvPath: envPath})
+	if err != nil {
+		t.Fatalf("unexpected error loading config with .env: %v", err)
+	}
+	if cfg.TLSCACert != "/etc/ssl/cluster-ca.crt" {
+		t.Errorf("expected TLSCACert from .env, got '%s'", cfg.TLSCACert)
+	}
+	if !cfg.Insecure {
+		t.Errorf("expected Insecure true from .env, got false")
+	}
+
+	// 3. OS environment takes precedence over .env file
+	os.Setenv("CLUSTER_TLS_CA_CERT", "/custom/os-ca.crt")
+	defer os.Unsetenv("CLUSTER_TLS_CA_CERT")
+	os.Setenv("CLUSTER_INSECURE", "false")
+	defer os.Unsetenv("CLUSTER_INSECURE")
+
+	cfg, err = Load(FlagOverrides{EnvPath: envPath})
+	if err != nil {
+		t.Fatalf("unexpected error loading config with OS env: %v", err)
+	}
+	if cfg.TLSCACert != "/custom/os-ca.crt" {
+		t.Errorf("expected TLSCACert from OS env, got '%s'", cfg.TLSCACert)
+	}
+	if cfg.Insecure {
+		t.Errorf("expected Insecure false from OS env, got true")
+	}
+
+	// 4. Flags take precedence over OS environment
+	cfg, err = Load(FlagOverrides{
+		TLSCACert: "/flag/ca.crt",
+		Insecure:  true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error loading config with flags: %v", err)
+	}
+	if cfg.TLSCACert != "/flag/ca.crt" {
+		t.Errorf("expected TLSCACert from flag, got '%s'", cfg.TLSCACert)
+	}
+	if !cfg.Insecure {
+		t.Errorf("expected Insecure true from flag, got false")
+	}
+}
+
