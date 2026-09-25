@@ -25,6 +25,8 @@ type Config struct {
 	WorkingURL        string        `json:"working_url"`
 	KnowledgeURL      string        `json:"knowledge_url"`
 	APIKey            string        `json:"api_key,omitempty"`
+	TLSCACert         string        `json:"tls_ca_cert,omitempty"`
+	Insecure          bool          `json:"insecure,omitempty"`
 	DefaultTimeout    time.Duration `json:"default_timeout"`
 	DeliberateTimeout time.Duration `json:"deliberate_timeout"`
 	SalienceThreshold float64       `json:"salience_threshold"`
@@ -40,6 +42,8 @@ type FlagOverrides struct {
 	KnowledgeURL      string
 	OrchestrationURL  string
 	APIKey            string
+	TLSCACert         string
+	Insecure          bool
 	Timeout           time.Duration
 	DeliberateTimeout time.Duration
 	SalienceThreshold float64
@@ -139,6 +143,15 @@ func Load(flags FlagOverrides) (*Config, error) {
 		}
 	}
 
+	if val := getEnv("CLUSTER_TLS_CA_CERT", ""); val != "" {
+		cfg.TLSCACert = val
+	}
+	if val := getEnv("CLUSTER_INSECURE", ""); val != "" {
+		if b, err := strconv.ParseBool(val); err == nil {
+			cfg.Insecure = b
+		}
+	}
+
 	// 4. CLI flag overrides (highest precedence)
 	if flags.SensoryURL != "" {
 		cfg.SensoryURL = flags.SensoryURL
@@ -154,6 +167,12 @@ func Load(flags FlagOverrides) (*Config, error) {
 	}
 	if flags.APIKey != "" {
 		cfg.APIKey = flags.APIKey
+	}
+	if flags.TLSCACert != "" {
+		cfg.TLSCACert = flags.TLSCACert
+	}
+	if flags.Insecure {
+		cfg.Insecure = true
 	}
 	if flags.Timeout > 0 {
 		cfg.DefaultTimeout = flags.Timeout
@@ -319,5 +338,9 @@ CLUSTER_DELIBERATE_TIMEOUT_MS=8000
 # Attention & Recall Parameters
 CLUSTER_SALIENCE_THRESHOLD=0.45
 CLUSTER_RECALL_TOP_K=5
+
+# Transport Encryption & TLS (optional)
+# CLUSTER_TLS_CA_CERT=/path/to/ca.crt
+# CLUSTER_INSECURE=false
 `
 }

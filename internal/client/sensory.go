@@ -23,11 +23,11 @@ type SensoryClient struct {
 	client  *BaseClient
 }
 
-// NewSensoryClient initialises a client for Node 3.
-func NewSensoryClient(baseURL string, timeout time.Duration) *SensoryClient {
+// NewSensoryClient initialises a client for Node 3 with optional TLS arguments.
+func NewSensoryClient(baseURL string, timeout time.Duration, tlsArgs ...interface{}) *SensoryClient {
 	return &SensoryClient{
 		baseURL: strings.TrimRight(baseURL, "/"),
-		client:  NewBaseClient(timeout, ""),
+		client:  NewBaseClient(timeout, "", tlsArgs...),
 	}
 }
 
@@ -85,6 +85,10 @@ func (c *SensoryClient) Filter(ctx context.Context, req model.FilterRequest, tra
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body from %s: %w", urlStr, err)
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, FormatUnauthorizedError(urlStr, string(respBytes))
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -297,6 +301,10 @@ func (c *SensoryClient) GetStats(ctx context.Context, traceID string) (*model.Se
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body from %s: %w", urlStr, err)
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, FormatUnauthorizedError(urlStr, string(respBytes))
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

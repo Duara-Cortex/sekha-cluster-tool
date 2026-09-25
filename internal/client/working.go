@@ -15,11 +15,11 @@ type WorkingClient struct {
 	client  *BaseClient
 }
 
-// NewWorkingClient initialises a client for Node 2 with inference-aware timeout handling.
-func NewWorkingClient(baseURL string, timeout time.Duration) *WorkingClient {
+// NewWorkingClient initialises a client for Node 2 with inference-aware timeout handling and optional TLS.
+func NewWorkingClient(baseURL string, timeout time.Duration, tlsArgs ...interface{}) *WorkingClient {
 	return &WorkingClient{
 		baseURL: baseURL,
-		client:  NewBaseClient(timeout, ""),
+		client:  NewBaseClient(timeout, "", tlsArgs...),
 	}
 }
 
