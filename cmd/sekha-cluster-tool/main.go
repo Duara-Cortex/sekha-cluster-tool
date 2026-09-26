@@ -19,8 +19,8 @@ import (
 )
 
 var (
-	// Version is injected at link time via -ldflags.
-	Version = "v1.0.0-dev"
+	// Version is injected at link time via -ldflags or defaults to the release version.
+	Version = "v1.0.9"
 )
 
 // GlobalFlags captures CLI arguments specified globally across any subcommand position.

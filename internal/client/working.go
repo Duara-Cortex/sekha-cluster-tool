@@ -23,7 +23,7 @@ func NewWorkingClient(baseURL string, timeout time.Duration, tlsArgs ...interfac
 	}
 }
 
-// Deliberate dispatches active context to Node 2 for reasoning and action synthesis.
+// Deliberate dispatches active context to Node 2 for stateless reasoning and action synthesis.
 func (c *WorkingClient) Deliberate(ctx context.Context, req model.DeliberateRequest, traceID string) (*model.DeliberateResponse, error) {
 	url := fmt.Sprintf("%s/api/v1/working/deliberate", c.baseURL)
 
@@ -40,26 +40,6 @@ func (c *WorkingClient) Deliberate(ctx context.Context, req model.DeliberateRequ
 	return &resp, nil
 }
 
-// GetScratchpad retrieves the current working memory state from Node 2.
-func (c *WorkingClient) GetScratchpad(ctx context.Context, traceID string) (*model.WorkingMemoryState, error) {
-	url := fmt.Sprintf("%s/api/v1/working/scratchpad", c.baseURL)
-	var resp model.WorkingMemoryState
-	if err := c.client.GetJSON(ctx, url, &resp, traceID); err != nil {
-		return nil, fmt.Errorf("node 2 scratchpad query failed: %w", err)
-	}
-	return &resp, nil
-}
-
-// Clear resets volatile working memory state on Node 2.
-func (c *WorkingClient) Clear(ctx context.Context, traceID string) error {
-	url := fmt.Sprintf("%s/api/v1/working/clear", c.baseURL)
-	var resp map[string]interface{}
-	if err := c.client.PostJSON(ctx, url, nil, &resp, traceID); err != nil {
-		return fmt.Errorf("node 2 clear failed: %w", err)
-	}
-	return nil
-}
-
 // GetHealth checks Node 2 service status and llama-server reachability.
 func (c *WorkingClient) GetHealth(ctx context.Context, traceID string) (*model.WorkingHealthResponse, error) {
 	url := fmt.Sprintf("%s/api/v1/working/health", c.baseURL)
@@ -69,3 +49,4 @@ func (c *WorkingClient) GetHealth(ctx context.Context, traceID string) (*model.W
 	}
 	return &resp, nil
 }
+

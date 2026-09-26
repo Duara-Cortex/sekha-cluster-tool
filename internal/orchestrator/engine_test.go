@@ -40,6 +40,7 @@ func TestOrchestrator_FullCycleSuccess(t *testing.T) {
 	}))
 	defer node3Server.Close()
 
+	var capturedConsolidateReq model.ConsolidateRequest
 	// Mock Node 1 (Knowledge Recall & Consolidate)
 	node1Server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedTraceIDs = append(receivedTraceIDs, r.Header.Get(telemetry.HeaderTraceID))
@@ -65,6 +66,7 @@ func TestOrchestrator_FullCycleSuccess(t *testing.T) {
 		}
 
 		if r.URL.Path == "/api/v1/memory/consolidate" {
+			_ = json.NewDecoder(r.Body).Decode(&capturedConsolidateReq)
 			resp := model.ConsolidateResponse{
 				Status:            "success",
 				TraceID:           r.Header.Get(telemetry.HeaderTraceID),
@@ -89,6 +91,7 @@ func TestOrchestrator_FullCycleSuccess(t *testing.T) {
 		resp := model.DeliberateResponse{
 			Status:           "ready",
 			StepIndex:        1,
+			TrajectoryLength: 1,
 			Thought:          "Temperature spike detected. Policy requires increasing fan level.",
 			ProposedAction:   "SET_FAN_SPEED_LEVEL_3",
 			IsComplete:       true,
@@ -137,6 +140,15 @@ func TestOrchestrator_FullCycleSuccess(t *testing.T) {
 	}
 	if res.ProposedAction != "SET_FAN_SPEED_LEVEL_3" {
 		t.Errorf("expected ProposedAction 'SET_FAN_SPEED_LEVEL_3', got '%s'", res.ProposedAction)
+	}
+	if res.Deliberation.StepIndex != 1 {
+		t.Errorf("expected Deliberation StepIndex 1, got %d", res.Deliberation.StepIndex)
+	}
+	if res.Deliberation.TrajectoryLength != 1 {
+		t.Errorf("expected Deliberation TrajectoryLength 1, got %d", res.Deliberation.TrajectoryLength)
+	}
+	if len(capturedConsolidateReq.Trajectory) != 1 || capturedConsolidateReq.Trajectory[0].StepIndex != 1 {
+		t.Errorf("expected consolidation trajectory with step_index 1, got: %+v", capturedConsolidateReq.Trajectory)
 	}
 	if len(res.Stages) != 4 {
 		t.Fatalf("expected 4 stage telemetry entries, got %d", len(res.Stages))
