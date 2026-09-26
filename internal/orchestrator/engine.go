@@ -195,10 +195,12 @@ func (o *Orchestrator) RunCycle(ctx context.Context, req model.OrchestrateReques
 		})
 		telemetry.LogStep(traceID, "WorkingMemory", fmt.Sprintf("Deliberation stage error: %v", err))
 		delibResp = &model.DeliberateResponse{
-			Status:         "failed",
-			Thought:        "Deliberation service unreachable; fallback to direct response.",
-			ProposedAction: "AWAIT_STABILISATION",
-			IsComplete:     false,
+			Status:           "failed",
+			StepIndex:        1,
+			TrajectoryLength: 1,
+			Thought:          "Deliberation service unreachable; fallback to direct response.",
+			ProposedAction:   "AWAIT_STABILISATION",
+			IsComplete:       false,
 		}
 	} else {
 		resp.Stages = append(resp.Stages, model.StageTelemetry{
