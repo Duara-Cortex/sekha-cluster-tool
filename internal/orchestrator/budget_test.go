@@ -1,7 +1,10 @@
 package orchestrator
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -27,6 +30,74 @@ func TestEstimateTokens_ErrsHigh(t *testing.T) {
 		}
 	}
 }
+
+func TestEstimateTokens_CountsNewlinesAndCaseSplits(t *testing.T) {
+	if got := EstimateTokens("a\nb"); got != 3 {
+		t.Errorf("a newline is a token in Node 2's tokenizer; got %d, want 3", got)
+	}
+	if got, whole := EstimateTokens("aBcDeF"), EstimateTokens("abcdef"); got <= whole {
+		t.Errorf("camelCase should cost more than one run: %d vs %d", got, whole)
+	}
+}
+
+func TestEstimateTokens_MonotonicInPrefix(t *testing.T) {
+	text := "[Session 12] User: Please remember that on 2024-03-05 MiraKestrel moved to Denver.\n\n  Ada's greyhound — 温度 42%; see https://ex.org/a_b?c=1"
+	prev := 0
+	for i := range text {
+		if got := EstimateTokens(text[:i]); got < prev {
+			t.Fatalf("estimate fell from %d to %d at byte %d (%q)", prev, got, i, text[:i])
+		} else {
+			prev = got
+		}
+	}
+}
+
+// calibrationFile holds Node 2 tokenizer counts for real BEAM chunks, collected live.
+const calibrationFile = "testdata/token_calibration.json"
+
+type calibrationSample struct {
+	ID           string `json:"id"`
+	Text         string `json:"text"`
+	ActualTokens int    `json:"actual_tokens"`
+}
+
+// TestEstimateTokens_NeverUnderestimatesCalibration checks EstimateTokens against Node 2's real
+// token counts: it must never be below them, and in aggregate it should stay within ~1.3x.
+func TestEstimateTokens_NeverUnderestimatesCalibration(t *testing.T) {
+	data, err := os.ReadFile(calibrationFile)
+	if errors.Is(err, os.ErrNotExist) {
+		t.Skip("no calibration fixtures in " + calibrationFile)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		Samples []calibrationSample `json:"samples"`
+	}
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.Samples) == 0 {
+		t.Fatal("calibration file has no samples")
+	}
+	est, actual := 0, 0
+	for _, s := range fixture.Samples {
+		e := EstimateTokens(s.Text)
+		if e < s.ActualTokens {
+			t.Errorf("%s: estimate %d < actual %d", s.ID, e, s.ActualTokens)
+		}
+		est += e
+		actual += s.ActualTokens
+	}
+	ratio := float64(est) / float64(actual)
+	t.Logf("%d samples: estimated %d / actual %d = %.3f", len(fixture.Samples), est, actual, ratio)
+	if ratio > maxCalibrationRatio {
+		t.Errorf("estimator runs %.3fx high on real text, want <= %.2f", ratio, maxCalibrationRatio)
+	}
+}
+
+// maxCalibrationRatio is the release target for estimated/actual on the calibration set.
+const maxCalibrationRatio = 1.3
 
 func TestTruncateToTokens_RuneAlignedAndMaximal(t *testing.T) {
 	text := strings.Repeat("温度 alert 42; ", 200)
@@ -57,15 +128,16 @@ func TestPackContext_RanksTruncatesAndRestoresOrder(t *testing.T) {
 		chunk("tiny-low", "short note", 0.1),
 	}
 	facts := []rankedFact{
-		{order: 0, id: "f-weak", text: strings.Repeat("weak fact ", 300), score: 0.55},
+		{order: 0, id: "f-weak", text: strings.Repeat("weak fact ", 1000), score: 0.55},
 		{order: 1, id: "f-strong", text: "[policy: Melt] glacier melt thresholds", score: 0.9},
 	}
-	packed, err := packContext("Assess melt", chunks, facts, budgetSettings{contextTokens: 4096, maxTokens: 256, reserveTokens: 384})
+	packed, err := packContext("Assess melt", chunks, facts, budgetSettings{contextTokens: 4096, maxTokens: 256, outputReserveTokens: 512, reserveTokens: 256})
 	if err != nil {
 		t.Fatal(err)
 	}
 	r := packed.report
-	if r.PromptBudgetTokens != 4096-256-384 || r.PromptLimitTokens != 4096-256 {
+	// The output side is Node 2's 512 reserve, since it exceeds max_tokens 256.
+	if r.PromptBudgetTokens != 4096-512-256 || r.PromptLimitTokens != 4096-512 || r.OutputReserveTokens != 512 {
 		t.Errorf("unexpected budget arithmetic: %+v", r)
 	}
 	if r.EstimatedPromptTokens > r.PromptBudgetTokens || !r.WithinBudget {
@@ -99,7 +171,7 @@ func TestPackContext_RanksTruncatesAndRestoresOrder(t *testing.T) {
 }
 
 func TestPackContext_RefusesWhenObjectiveCannotFit(t *testing.T) {
-	_, err := packContext(strings.Repeat("goal ", 2000), nil, nil, budgetSettings{contextTokens: 1024, maxTokens: 512, reserveTokens: 384})
+	_, err := packContext(strings.Repeat("goal ", 2000), nil, nil, budgetSettings{contextTokens: 1024, maxTokens: 512, outputReserveTokens: 512, reserveTokens: 256})
 	if err == nil || !strings.Contains(err.Error(), "prompt budget exhausted") {
 		t.Fatalf("expected budget error, got %v", err)
 	}
@@ -110,7 +182,7 @@ func TestPackContext_CapsDecisionList(t *testing.T) {
 	for i := range 200 {
 		chunks = append(chunks, chunk(fmt.Sprintf("c%d", i), strings.Repeat("word ", 200), 0.5))
 	}
-	packed, _ := packContext("x", chunks, nil, budgetSettings{contextTokens: 4096, maxTokens: 256, reserveTokens: 384})
+	packed, _ := packContext("x", chunks, nil, budgetSettings{contextTokens: 4096, maxTokens: 256, outputReserveTokens: 512, reserveTokens: 256})
 	r := packed.report
 	if len(r.Decisions) != maxPackingDecisions || r.DecisionsOmitted != r.ChunksDropped+r.ChunksTruncated-maxPackingDecisions {
 		t.Errorf("decision list not capped consistently: %d listed, %d omitted, %d dropped", len(r.Decisions), r.DecisionsOmitted, r.ChunksDropped)

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -410,5 +411,46 @@ func TestConfig_StageTimeoutPrecedence(t *testing.T) {
 	cfg, _ = Load(FlagOverrides{EnvPath: envPath, ConsolidateTimeout: 3 * time.Second, ConsolidateTimeoutFlag: "--consolidate-timeout"})
 	if cfg.ConsolidateTimeout != 3*time.Second || cfg.ConsolidateSource != "--consolidate-timeout flag" {
 		t.Errorf("flag: %v (%s)", cfg.ConsolidateTimeout, cfg.ConsolidateSource)
+	}
+}
+
+func TestConfig_DeliberateBudgetPrecedence(t *testing.T) {
+	for _, k := range []string{"CLUSTER_DELIBERATE_CONTEXT_TOKENS", "CLUSTER_DELIBERATE_OUTPUT_RESERVE", "CLUSTER_DELIBERATE_PROMPT_RESERVE"} {
+		t.Setenv(k, "")
+	}
+	empty := filepath.Join(t.TempDir(), "empty.env")
+	_ = os.WriteFile(empty, nil, 0644)
+	cfg, err := Load(FlagOverrides{EnvPath: empty})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ContextTokens != DefaultContextTokens || cfg.OutputReserve != DefaultOutputReserveTokens || cfg.PromptReserve != DefaultPromptReserveTokens {
+		t.Errorf("defaults not resolved for env show: %d/%d/%d", cfg.ContextTokens, cfg.OutputReserve, cfg.PromptReserve)
+	}
+
+	envPath := filepath.Join(t.TempDir(), ".env")
+	_ = os.WriteFile(envPath, []byte("CLUSTER_DELIBERATE_CONTEXT_TOKENS=8192\nCLUSTER_DELIBERATE_OUTPUT_RESERVE=768\nCLUSTER_DELIBERATE_PROMPT_RESERVE=300\n"), 0644)
+	cfg, _ = Load(FlagOverrides{EnvPath: envPath})
+	if cfg.ContextTokens != 8192 || cfg.OutputReserve != 768 || cfg.PromptReserve != 300 {
+		t.Errorf(".env: %d/%d/%d", cfg.ContextTokens, cfg.OutputReserve, cfg.PromptReserve)
+	}
+
+	t.Setenv("CLUSTER_DELIBERATE_OUTPUT_RESERVE", "640")
+	cfg, _ = Load(FlagOverrides{EnvPath: envPath})
+	if cfg.OutputReserve != 640 {
+		t.Errorf("OS env output reserve: %d", cfg.OutputReserve)
+	}
+	cfg, _ = Load(FlagOverrides{EnvPath: envPath, OutputReserve: 1024})
+	if cfg.OutputReserve != 1024 {
+		t.Errorf("flag output reserve: %d", cfg.OutputReserve)
+	}
+}
+
+func TestTemplateDotEnv_DocumentsBudgetSettings(t *testing.T) {
+	tmpl := TemplateDotEnv()
+	for _, want := range []string{"CLUSTER_DELIBERATE_CONTEXT_TOKENS=4096", "CLUSTER_DELIBERATE_OUTPUT_RESERVE=512", "CLUSTER_DELIBERATE_PROMPT_RESERVE=256"} {
+		if !strings.Contains(tmpl, want) {
+			t.Errorf("env init template lacks %s", want)
+		}
 	}
 }

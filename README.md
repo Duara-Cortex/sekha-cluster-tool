@@ -83,7 +83,8 @@ CLUSTER_RECALL_MIN_SIM=0.50
 # Payload cap & Node 2 context budget
 CLUSTER_MAX_INPUT_BYTES=1048576
 CLUSTER_DELIBERATE_CONTEXT_TOKENS=4096
-CLUSTER_DELIBERATE_PROMPT_RESERVE=384
+CLUSTER_DELIBERATE_OUTPUT_RESERVE=512
+CLUSTER_DELIBERATE_PROMPT_RESERVE=256
 
 # Transport Encryption & TLS (optional)
 # CLUSTER_TLS_CA_CERT=/path/to/ca.crt
@@ -317,9 +318,23 @@ Recalled nodes pass to Node 2 only if all of these hold:
 The recall query is the directive plus an excerpt of up to 512 runes from the most salient chunk. With `--full`, `stages[1].relevance_gate` lists every kept and dropped node with its `sim_score`, term overlap and drop reason (`missing_sim_score`, `below_sim_floor`, `anchor_mismatch`, `insufficient_term_overlap`). `recall.nodes` in the output contains only the kept nodes.
 
 #### Node 2 context budget (Stage 3)
-The prompt budget is `--context-tokens` (default `4096`, env `CLUSTER_DELIBERATE_CONTEXT_TOKENS`) minus `--max-tokens`, minus `--prompt-reserve` (default `384`, env `CLUSTER_DELIBERATE_PROMPT_RESERVE`) for the Node 2 template. Tokens are estimated conservatively, erring high: every digit, symbol and non-ASCII byte pair counts as one token. Recalled facts get at most a quarter of the budget, ranked by `sim_score`. Chunks fill the rest in salience order. The first chunk that doesn't fit is truncated and lower ranked chunks are dropped. Kept chunks go to Node 2 in their original order.
+The prompt budget is `--context-tokens` (default `4096`, env `CLUSTER_DELIBERATE_CONTEXT_TOKENS`) minus the output reserve, minus `--prompt-reserve` (default `256`, env `CLUSTER_DELIBERATE_PROMPT_RESERVE`) for the Node 2 template. The output reserve is the larger of `--output-reserve` (default `512`, env `CLUSTER_DELIBERATE_OUTPUT_RESERVE`) and `--max-tokens`. The context window and output reserve must match Node 2's `n_ctx` and `OutputReserve`, so that context − output reserve equals the `prompt_window_tokens` Node 2 reports. The template reserve covers Node 2's template, measured at ~184 tokens, plus a margin.
 
-With `--full`, `stages[2].context_budget` reports the budget, the estimated prompt tokens, Node 2's reported `prompt_tokens`, `within_budget`, and each truncation or drop with its token counts. If the objective alone can't fit, nothing is sent to Node 2 and the stage fails with an explicit error. Stage 4 still consolidates the full, untruncated sensory stream.
+Tokens are estimated without a tokenizer (`heuristic-v2`), erring high. An ASCII word costs one token for its first 4 letters and one more per 3 letters after that. Every digit, symbol and newline counts as one token, and each non-ASCII byte pair counts as one. Recalled facts get at most a quarter of the budget, ranked by `sim_score`. Chunks fill the rest in salience order. The first chunk that doesn't fit is truncated and lower ranked chunks are dropped. Kept chunks go to Node 2 in their original order.
+
+The request carries `prepacked: true` and `prompt_budget_tokens`, so Node 2 doesn't cut the context a second time.
+
+`deliberation.context_budget` reports both sides:
+- **The tool's side:** `chunks_packed`, `chunks_dropped`, `estimated_prompt_tokens`, and so on.
+- **Node 2's side:**
+  - `node2_usage` is `reported` when Node 2 returned `context_usage`, and `unknown` for older Node 2 builds.
+  - `node2_context_usage` holds Node 2's `sensory_received`, `sensory_kept`, `sensory_dropped`, `sensory_truncated`, `facts_received`, `facts_kept`, `estimated_prompt_tokens`, `actual_prompt_tokens` and `prompt_window_tokens`.
+  - `node2_second_cut` is `true` if Node 2 dropped or truncated anything the tool sent. It is telemetry only.
+- **`within_budget`:**
+  - When Node 2 reports usage, it checks Node 2's actual prompt tokens against Node 2's `prompt_window_tokens`.
+  - Otherwise it checks `prompt_tokens` against context − output reserve.
+
+With `--full`, `stages[2].context_budget` also lists each truncation or drop with its token counts. If the objective alone can't fit, nothing is sent to Node 2 and the stage fails with an explicit error. Stage 4 still consolidates the full, untruncated sensory stream.
 
 ---
 

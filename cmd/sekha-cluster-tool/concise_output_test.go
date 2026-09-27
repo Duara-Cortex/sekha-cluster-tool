@@ -368,7 +368,7 @@ func TestUsage_DocumentsNewOptions(t *testing.T) {
 	os.Stderr = old
 	var buf bytes.Buffer
 	_, _ = buf.ReadFrom(r)
-	for _, want := range []string{"--full", "loop_complete", "CLUSTER_CONSOLIDATE_TIMEOUT_MS", "CLUSTER_SENSORY_TIMEOUT_MS", "--consolidate-timeout", "Exit codes"} {
+	for _, want := range []string{"--full", "loop_complete", "CLUSTER_CONSOLIDATE_TIMEOUT_MS", "CLUSTER_SENSORY_TIMEOUT_MS", "--consolidate-timeout", "Exit codes", "--output-reserve", "CLUSTER_DELIBERATE_OUTPUT_RESERVE", "prepacked"} {
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("--help does not mention %s", want)
 		}
@@ -376,11 +376,11 @@ func TestUsage_DocumentsNewOptions(t *testing.T) {
 }
 
 func TestParseArgs_NewFlagsReachSubcommand(t *testing.T) {
-	global, cmd, args := parseArgs([]string{"orchestrate", "--consolidate-timeout", "40ms", "--sensory-timeout=5s", "--full", "--timeout", "2s"})
+	global, cmd, args := parseArgs([]string{"orchestrate", "--consolidate-timeout", "40ms", "--sensory-timeout=5s", "--full", "--output-reserve", "600", "--timeout", "2s"})
 	if cmd != "orchestrate" || global.Timeout != 2*time.Second {
 		t.Fatalf("cmd=%q timeout=%v", cmd, global.Timeout)
 	}
-	want := []string{"--consolidate-timeout", "40ms", "--sensory-timeout=5s", "--full"}
+	want := []string{"--consolidate-timeout", "40ms", "--sensory-timeout=5s", "--full", "--output-reserve", "600"}
 	if strings.Join(args, "|") != strings.Join(want, "|") {
 		t.Errorf("new flags were consumed as global flags: got %q, want %q", args, want)
 	}

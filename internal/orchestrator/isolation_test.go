@@ -29,7 +29,7 @@ var isolationTopics = [10][3]string{
 	{"falcon", "falconry", "hood"},
 }
 
-const templateOverheadTokens = 300 // what the mock Node 2 template adds; below the 384 reserve
+const templateOverheadTokens = 200 // what the mock Node 2 template adds (~184 measured live); below the 256 reserve
 
 // leakyKnowledge simulates Node 1 in the worst case: every consolidated cycle is extracted into
 // a concept node that comes back on every later recall with a high sim_score, the run's anchor,
