@@ -27,6 +27,15 @@ func TestMain(m *testing.M) {
 		main()
 		os.Exit(0)
 	}
+	if os.Getenv("CLUSTER_ENV_FILE") == "" {
+		tmpDir, err := os.MkdirTemp("", "sekha-test-env-*")
+		if err == nil {
+			emptyEnv := filepath.Join(tmpDir, "empty.env")
+			_ = os.WriteFile(emptyEnv, []byte(""), 0644)
+			_ = os.Setenv("CLUSTER_ENV_FILE", emptyEnv)
+			defer os.RemoveAll(tmpDir)
+		}
+	}
 	os.Exit(m.Run())
 }
 

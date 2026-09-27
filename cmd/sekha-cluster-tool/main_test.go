@@ -1654,6 +1654,291 @@ func TestFormat401Diagnostic(t *testing.T) {
 	})
 }
 
+func setupEmptyEnvFileForMain(t *testing.T) {
+	t.Helper()
+	emptyEnv := filepath.Join(t.TempDir(), "empty.env")
+	if err := os.WriteFile(emptyEnv, []byte(""), 0644); err != nil {
+		t.Fatalf("failed to write empty env file: %v", err)
+	}
+	t.Setenv("CLUSTER_ENV_FILE", emptyEnv)
+}
+
+func TestRunStatus_TLSCACertFailure(t *testing.T) {
+	setupEmptyEnvFileForMain(t)
+	s, w, _, global := setupMockCluster(
+		defaultHealthySensoryHandler(),
+		defaultHealthyWorkingHandler(),
+		defaultHealthyKnowledgeHandler(),
+	)
+	defer s.Close()
+	defer w.Close()
+
+	// Configure Node 1 as an HTTPS endpoint
+	global.KnowledgeURL = "https://192.168.8.213:8084"
+	missingCA := "/nonexistent/ca.pem"
+
+	t.Run("dashboard output shows CA error clearly", func(t *testing.T) {
+		out := captureStdout(func() {
+			code := runStatus(global, []string{"--tls-ca-cert", missingCA})
+			if code != 0 {
+				t.Errorf("expected exit code 0 for status, got %d", code)
+			}
+		})
+
+		if !strings.Contains(out, missingCA) {
+			t.Errorf("expected dashboard to contain CA path '%s', got:\n%s", missingCA, out)
+		}
+		if !strings.Contains(out, "--tls-ca-cert flag") {
+			t.Errorf("expected dashboard to contain source '--tls-ca-cert flag', got:\n%s", out)
+		}
+		if !strings.Contains(out, "no such file or directory") {
+			t.Errorf("expected dashboard to contain OS error, got:\n%s", out)
+		}
+		if !strings.Contains(out, "DEGRADED (2/3 Online)") {
+			t.Errorf("expected dashboard to show DEGRADED (2/3 Online), got:\n%s", out)
+		}
+	})
+
+	t.Run("json output shows CA error clearly", func(t *testing.T) {
+		out := captureStdout(func() {
+			code := runStatus(global, []string{"--tls-ca-cert", missingCA, "--json"})
+			if code != 0 {
+				t.Errorf("expected exit code 0 for status, got %d", code)
+			}
+		})
+
+		var res map[string]interface{}
+		if err := json.Unmarshal([]byte(out), &res); err != nil {
+			t.Fatalf("failed to parse status JSON output: %v, raw:\n%s", err, out)
+		}
+
+		if res["cluster_status"] != "degraded_or_partially_offline" {
+			t.Errorf("expected cluster_status 'degraded_or_partially_offline', got '%v'", res["cluster_status"])
+		}
+
+		nodes, ok := res["nodes"].([]interface{})
+		if !ok || len(nodes) < 3 {
+			t.Fatalf("expected 3 nodes in status JSON, got %+v", res["nodes"])
+		}
+
+		var foundK bool
+		for _, rawNode := range nodes {
+			nodeMap := rawNode.(map[string]interface{})
+			if strings.Contains(nodeMap["name"].(string), "Knowledge") {
+				foundK = true
+				if nodeMap["status"] != "unreachable" {
+					t.Errorf("expected knowledge node status 'unreachable', got '%v'", nodeMap["status"])
+				}
+				errStr, _ := nodeMap["error"].(string)
+				if !strings.Contains(errStr, missingCA) {
+					t.Errorf("expected error to contain CA path '%s', got '%s'", missingCA, errStr)
+				}
+				if !strings.Contains(errStr, "--tls-ca-cert flag") {
+					t.Errorf("expected error to contain source, got '%s'", errStr)
+				}
+			}
+		}
+		if !foundK {
+			t.Errorf("knowledge node not found in status JSON")
+		}
+	})
+}
+
+func TestRunPing_TLSCACertFailure(t *testing.T) {
+	setupEmptyEnvFileForMain(t)
+	s, w, _, global := setupMockCluster(
+		defaultHealthySensoryHandler(),
+		defaultHealthyWorkingHandler(),
+		defaultHealthyKnowledgeHandler(),
+	)
+	defer s.Close()
+	defer w.Close()
+
+	global.KnowledgeURL = "https://192.168.8.213:8084"
+	missingCA := "/nonexistent/ca.pem"
+
+	t.Run("text output shows CA error and exits with code 1", func(t *testing.T) {
+		var code int
+		out := captureStdout(func() {
+			code = runPing(global, []string{"--tls-ca-cert", missingCA})
+		})
+
+		if code != 1 {
+			t.Errorf("expected ping exit code 1, got %d", code)
+		}
+		if !strings.Contains(out, "[FAIL] Node 1 (Knowledge)") {
+			t.Errorf("expected ping output to contain '[FAIL] Node 1 (Knowledge)', got:\n%s", out)
+		}
+		if !strings.Contains(out, missingCA) {
+			t.Errorf("expected ping output to contain CA path '%s', got:\n%s", missingCA, out)
+		}
+		if !strings.Contains(out, "DEGRADED (2/3 nodes online)") {
+			t.Errorf("expected ping output to show degraded, got:\n%s", out)
+		}
+	})
+
+	t.Run("json output shows CA error and exits with code 1", func(t *testing.T) {
+		var code int
+		out := captureStdout(func() {
+			code = runPing(global, []string{"--tls-ca-cert", missingCA, "--json"})
+		})
+
+		if code != 1 {
+			t.Errorf("expected ping exit code 1, got %d", code)
+		}
+
+		var res map[string]interface{}
+		if err := json.Unmarshal([]byte(out), &res); err != nil {
+			t.Fatalf("failed to parse ping JSON output: %v, raw:\n%s", err, out)
+		}
+
+		if res["all_healthy"] != false {
+			t.Errorf("expected all_healthy false, got %v", res["all_healthy"])
+		}
+
+		nodes, ok := res["nodes"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected nodes map in ping JSON, got %T", res["nodes"])
+		}
+
+		kNode, ok := nodes["knowledge"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected knowledge entry in ping JSON nodes")
+		}
+		if kNode["reachable"] != false {
+			t.Errorf("expected knowledge reachable false, got %v", kNode["reachable"])
+		}
+		errStr, _ := kNode["error"].(string)
+		if !strings.Contains(errStr, missingCA) {
+			t.Errorf("expected ping JSON error to contain CA path '%s', got '%s'", missingCA, errStr)
+		}
+	})
+}
+
+func TestSubcommands_TLSCACertFailure(t *testing.T) {
+	setupEmptyEnvFileForMain(t)
+	global := GlobalFlags{
+		TLSCACert:    "/nonexistent/ca.pem",
+		SensoryURL:   "http://localhost:8081",
+		WorkingURL:   "http://localhost:8083",
+		KnowledgeURL: "https://localhost:8084",
+	}
+
+	subcommands := []struct {
+		name string
+		run  func()
+	}{
+		{
+			name: "filter",
+			run: func() {
+				runFilter(global, []string{"--text", "hello"})
+			},
+		},
+		{
+			name: "recall",
+			run: func() {
+				runRecall(global, []string{"--query", "test"})
+			},
+		},
+		{
+			name: "deliberate",
+			run: func() {
+				runDeliberate(global, []string{"--task", "test"})
+			},
+		},
+		{
+			name: "consolidate",
+			run: func() {
+				runConsolidate(global, []string{"label", "summary"})
+			},
+		},
+		{
+			name: "orchestrate",
+			run: func() {
+				runOrchestrate(global, []string{"--input", "test", "--directive", "goal"})
+			},
+		},
+	}
+
+	for _, sc := range subcommands {
+		t.Run(sc.name+"_fails_with_outputError_JSON", func(t *testing.T) {
+			out, code := captureOutputWithExit(sc.run)
+			if code != 1 {
+				t.Fatalf("[%s] expected exit code 1, got %d, out: %s", sc.name, code, out)
+			}
+			var res map[string]interface{}
+			if err := json.Unmarshal([]byte(out), &res); err != nil {
+				t.Fatalf("[%s] output was not JSON: %v, out:\n%s", sc.name, err, out)
+			}
+			if res["status"] != "error" {
+				t.Errorf("[%s] expected status 'error', got '%v'", sc.name, res["status"])
+			}
+			errStr, _ := res["error"].(string)
+			if !strings.Contains(errStr, "/nonexistent/ca.pem") {
+				t.Errorf("[%s] expected error to contain CA path, got '%s'", sc.name, errStr)
+			}
+			if !strings.Contains(errStr, "--tls-ca-cert flag") {
+				t.Errorf("[%s] expected error to contain source, got '%s'", sc.name, errStr)
+			}
+		})
+	}
+}
+
+func TestTLSCACert_DirectoryAndNonPEM_Subcommands(t *testing.T) {
+	setupEmptyEnvFileForMain(t)
+	tmpDir := t.TempDir()
+
+	// 1. Directory as CA path
+	t.Run("directory path gives is a directory error", func(t *testing.T) {
+		global := GlobalFlags{
+			TLSCACert:    tmpDir,
+			SensoryURL:   "http://localhost:8081",
+			WorkingURL:   "http://localhost:8083",
+			KnowledgeURL: "https://localhost:8084",
+		}
+		out, code := captureOutputWithExit(func() {
+			runFilter(global, []string{"--text", "hello"})
+		})
+		if code != 1 {
+			t.Fatalf("expected exit code 1, got %d", code)
+		}
+		var res map[string]interface{}
+		_ = json.Unmarshal([]byte(out), &res)
+		errStr, _ := res["error"].(string)
+		if !strings.Contains(errStr, "is a directory") {
+			t.Errorf("expected error to mention 'is a directory', got: %s", errStr)
+		}
+	})
+
+	// 2. Non-PEM file as CA path
+	t.Run("non-PEM file gives openssl suggestion", func(t *testing.T) {
+		badFile := filepath.Join(tmpDir, "invalid.pem")
+		_ = os.WriteFile(badFile, []byte("NOT PEM DATA"), 0644)
+		global := GlobalFlags{
+			TLSCACert:    badFile,
+			SensoryURL:   "http://localhost:8081",
+			WorkingURL:   "http://localhost:8083",
+			KnowledgeURL: "https://localhost:8084",
+		}
+		out, code := captureOutputWithExit(func() {
+			runRecall(global, []string{"--query", "test"})
+		})
+		if code != 1 {
+			t.Fatalf("expected exit code 1, got %d", code)
+		}
+		var res map[string]interface{}
+		_ = json.Unmarshal([]byte(out), &res)
+		errStr, _ := res["error"].(string)
+		if !strings.Contains(errStr, "contains no valid PEM certificates") {
+			t.Errorf("expected error to mention 'contains no valid PEM certificates', got: %s", errStr)
+		}
+		expectedCmd := "openssl x509 -in " + badFile + " -noout -subject"
+		if !strings.Contains(errStr, expectedCmd) {
+			t.Errorf("expected error to suggest '%s', got: %s", expectedCmd, errStr)
+		}
+	})
+}
+
 
 
 

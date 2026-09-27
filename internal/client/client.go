@@ -4,13 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"os"
+	"strings"
 	"time"
 
 	"github.com/Duara-Cortex/sekha-cluster-tool/internal/config"
@@ -54,8 +53,9 @@ type Config = config.Config
 
 // TLSOptions defines custom certificate and TLS verification parameters.
 type TLSOptions struct {
-	CACertPath string
-	Insecure   bool
+	CACertPath   string
+	CACertSource string
+	Insecure     bool
 }
 
 // ErrUnauthorized represents an actionable HTTP 401 Unauthorized error.
@@ -82,18 +82,37 @@ func FormatUnauthorizedError(url, body string) error {
 	}
 }
 
+type tlsErrorRoundTripper struct {
+	base http.RoundTripper
+	err  error
+}
+
+func (t *tlsErrorRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL != nil && strings.EqualFold(req.URL.Scheme, "https") {
+		return nil, t.err
+	}
+	return t.base.RoundTrip(req)
+}
+
 // BaseClient handles HTTP requests with connection pooling, TLS configuration, and trace injection.
 type BaseClient struct {
 	httpClient *http.Client
 	apiKey     string
 	tlsCACert  string
 	insecure   bool
+	tlsErr     error
+}
+
+// TLSErr returns any error encountered while loading the configured TLS CA certificate.
+func (c *BaseClient) TLSErr() error {
+	return c.tlsErr
 }
 
 // NewBaseClient creates a BaseClient with optimised connection pooling, keep-alive settings,
 // and optional TLS transport configuration (custom root CA cert pool and InsecureSkipVerify).
 func NewBaseClient(timeout time.Duration, apiKey string, tlsArgs ...interface{}) *BaseClient {
 	var caCertPath string
+	var caCertSource string
 	var insecure bool
 
 	for _, arg := range tlsArgs {
@@ -104,10 +123,22 @@ func NewBaseClient(timeout time.Duration, apiKey string, tlsArgs ...interface{})
 			insecure = v
 		case TLSOptions:
 			caCertPath = v.CACertPath
+			caCertSource = v.CACertSource
 			insecure = v.Insecure
 		case *TLSOptions:
 			if v != nil {
 				caCertPath = v.CACertPath
+				caCertSource = v.CACertSource
+				insecure = v.Insecure
+			}
+		case Config:
+			caCertPath = v.TLSCACert
+			caCertSource = v.TLSCACertSource
+			insecure = v.Insecure
+		case *Config:
+			if v != nil {
+				caCertPath = v.TLSCACert
+				caCertSource = v.TLSCACertSource
 				insecure = v.Insecure
 			}
 		}
@@ -127,31 +158,36 @@ func NewBaseClient(timeout time.Duration, apiKey string, tlsArgs ...interface{})
 		ExpectContinueTimeout: 500 * time.Millisecond,
 	}
 
+	var tlsErr error
 	if caCertPath != "" || insecure {
 		tlsConfig := &tls.Config{
 			InsecureSkipVerify: insecure,
 		}
 		if caCertPath != "" {
-			caCertPool, err := x509.SystemCertPool()
-			if err != nil || caCertPool == nil {
-				caCertPool = x509.NewCertPool()
+			caCertPool, err := config.LoadCACertPool(caCertPath, caCertSource)
+			if err != nil {
+				tlsErr = err
+			} else {
+				tlsConfig.RootCAs = caCertPool
 			}
-			if caBytes, err := os.ReadFile(caCertPath); err == nil {
-				caCertPool.AppendCertsFromPEM(caBytes)
-			}
-			tlsConfig.RootCAs = caCertPool
 		}
 		transport.TLSClientConfig = tlsConfig
 	}
 
+	var rt http.RoundTripper = transport
+	if tlsErr != nil {
+		rt = &tlsErrorRoundTripper{base: transport, err: tlsErr}
+	}
+
 	return &BaseClient{
 		httpClient: &http.Client{
-			Transport: transport,
+			Transport: rt,
 			Timeout:   timeout,
 		},
 		apiKey:    apiKey,
 		tlsCACert: caCertPath,
 		insecure:  insecure,
+		tlsErr:    tlsErr,
 	}
 }
 
@@ -185,6 +221,10 @@ func (c *BaseClient) HTTPClient() *http.Client {
 
 // PostJSON marshals a request payload, attaches headers, and decodes the JSON response.
 func (c *BaseClient) PostJSON(ctx context.Context, url string, payload interface{}, target interface{}, traceID string) error {
+	if c.tlsErr != nil && strings.HasPrefix(strings.ToLower(url), "https://") {
+		return c.tlsErr
+	}
+
 	var bodyReader io.Reader
 	if payload != nil {
 		data, err := json.Marshal(payload)
@@ -236,6 +276,10 @@ func (c *BaseClient) PostJSON(ctx context.Context, url string, payload interface
 
 // GetJSON performs an HTTP GET request, attaches headers, and decodes the JSON response.
 func (c *BaseClient) GetJSON(ctx context.Context, url string, target interface{}, traceID string) error {
+	if c.tlsErr != nil && strings.HasPrefix(strings.ToLower(url), "https://") {
+		return c.tlsErr
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return fmt.Errorf("failed to initialise HTTP request: %w", err)

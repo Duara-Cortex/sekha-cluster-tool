@@ -80,6 +80,10 @@ CLUSTER_RECALL_MIN_SIM=0.50
 CLUSTER_MAX_INPUT_BYTES=1048576
 CLUSTER_DELIBERATE_CONTEXT_TOKENS=4096
 CLUSTER_DELIBERATE_PROMPT_RESERVE=384
+
+# Transport Encryption & TLS (optional)
+# CLUSTER_TLS_CA_CERT=/path/to/ca.crt
+# CLUSTER_INSECURE=false
 ```
 
 To inspect the actively resolved configuration:
@@ -312,6 +316,31 @@ sekha-cluster-tool orchestrate \
 
 ---
 
+## 🔒 Transport Layer Security (TLS)
+
+When connecting to HTTPS cluster endpoints (e.g. Node 1 using a private or self-signed CA certificate), configure the root CA certificate to establish trust:
+
+- **Flag:** `--tls-ca-cert <path>`
+- **Environment:** `CLUSTER_TLS_CA_CERT=<path>`
+
+### Certificate Validation & Diagnostics
+If a TLS CA certificate path is configured, `sekha-cluster-tool` validates the certificate file upfront and **fails loudly** with actionable diagnostics if:
+1. **The file is missing or unreadable:** the error reports the configured path, the resolved absolute path (if relative), the configuration source (flag, environment variable, or `.env` file), and the exact OS error (`no such file or directory`, `permission denied`, etc.).
+2. **The file is a directory:** the error reports `read <path>: is a directory`.
+3. **The file contains no valid PEM certificates:** the error reports that the file contains no valid PEM certificates and suggests inspecting the certificate with:
+   ```bash
+   openssl x509 -in <path> -noout -subject
+   ```
+
+In `status` and `ping`, the CA failure is surfaced directly on the affected HTTPS node in both the terminal dashboard and `--json` machine output instead of a generic OFFLINE/x509 verification error. All other subcommands (`filter`, `recall`, `deliberate`, `consolidate`, `orchestrate`) fail immediately with structured JSON error output.
+
+### Insecure Verification & System Trust
+- **No CA configured:** system root certificates are used by default.
+- **Bypass verification:** pass `--insecure` or set `CLUSTER_INSECURE=true` to skip TLS certificate verification (`InsecureSkipVerify: true`) for testing or development environments.
+
+---
+
 ## 📄 Licence
 
 Apache 2.0. Authored by the **Duara Cortex** team.
+
