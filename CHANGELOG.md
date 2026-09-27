@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.0.11
+## v1.0.12
 
 ### Changed
 - **`orchestrate` output is concise by default.** It is a few KB for any input up to the 1 MiB cap; an 87 KB input used to produce about 227 KB. `status`, `is_complete`, `stages[]`, `final_thought`, `proposed_action`, `trace_id`, `session_id` and `total_duration_ms` come first, so stage outcomes fit in a 2 KB preview. `loop_complete` follows. `stages[]` entries carry `stage_name`, `status`, `error` and `duration_ms`. `sensory`, `recall`, `deliberation` and `consolidation` are summarised as counts, and the relevance gate as thresholds plus `nodes_in` / `nodes_kept` / `nodes_dropped`. Chunk text, recalled nodes and the per-node `kept[]`/`dropped[]` lists are gone from the default output.
