@@ -46,11 +46,17 @@ func (p ClusterProbeResult) findNode(key string) *NodeProbeResult {
 	return nil
 }
 
+func isHTTPS(endpoint string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(endpoint)), "https://")
+}
+
 // ProbeClusterHealth concurrently probes Node 3, Node 2, and Node 1 with bounded timeouts.
 func ProbeClusterHealth(ctx context.Context, cfg Config, timeout time.Duration, traceID string) ClusterProbeResult {
 	if timeout <= 0 {
 		timeout = 500 * time.Millisecond
 	}
+
+	tlsErr := cfg.ValidateTLS()
 
 	results := make([]NodeProbeResult, 3)
 	var wg sync.WaitGroup
@@ -67,6 +73,18 @@ func ProbeClusterHealth(ctx context.Context, cfg Config, timeout time.Duration, 
 				URL:    "(not configured)",
 				Status: "unconfigured",
 				Error:  "Endpoint address not set in .env, environment, flags, or build",
+			}
+			return
+		}
+		if isHTTPS(cfg.SensoryURL) && tlsErr != nil {
+			results[0] = NodeProbeResult{
+				Name:     "Sensory Layer",
+				Role:     "Sensory Buffer & Attention Filter",
+				Key:      "sensory",
+				URL:      cfg.SensoryURL,
+				Status:   "unreachable",
+				Duration: 0,
+				Error:    tlsErr.Error(),
 			}
 			return
 		}
@@ -113,6 +131,18 @@ func ProbeClusterHealth(ctx context.Context, cfg Config, timeout time.Duration, 
 			}
 			return
 		}
+		if isHTTPS(cfg.WorkingURL) && tlsErr != nil {
+			results[1] = NodeProbeResult{
+				Name:     "Working Memory Layer",
+				Role:     "Working Memory & Inference Engine",
+				Key:      "working",
+				URL:      cfg.WorkingURL,
+				Status:   "unreachable",
+				Duration: 0,
+				Error:    tlsErr.Error(),
+			}
+			return
+		}
 		wClient := NewWorkingClient(cfg.WorkingURL, timeout, cfg.TLSCACert, cfg.Insecure)
 		t0 := time.Now()
 		cCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -146,6 +176,18 @@ func ProbeClusterHealth(ctx context.Context, cfg Config, timeout time.Duration, 
 	go func() {
 		defer wg.Done()
 		if cfg.KnowledgeURL == "" {
+			if tlsErr != nil {
+				results[2] = NodeProbeResult{
+					Name:     "Knowledge Layer",
+					Role:     "Knowledge Graph & Consolidation Store",
+					Key:      "knowledge",
+					URL:      "(not configured)",
+					Status:   "unreachable",
+					Duration: 0,
+					Error:    tlsErr.Error(),
+				}
+				return
+			}
 			results[2] = NodeProbeResult{
 				Name:   "Knowledge Layer",
 				Role:   "Knowledge Graph & Consolidation Store",
@@ -153,6 +195,18 @@ func ProbeClusterHealth(ctx context.Context, cfg Config, timeout time.Duration, 
 				URL:    "(not configured)",
 				Status: "unconfigured",
 				Error:  "Endpoint address not set in .env, environment, flags, or build",
+			}
+			return
+		}
+		if (isHTTPS(cfg.KnowledgeURL) || cfg.TLSCACert != "") && tlsErr != nil {
+			results[2] = NodeProbeResult{
+				Name:     "Knowledge Layer",
+				Role:     "Knowledge Graph & Consolidation Store",
+				Key:      "knowledge",
+				URL:      cfg.KnowledgeURL,
+				Status:   "unreachable",
+				Duration: 0,
+				Error:    tlsErr.Error(),
 			}
 			return
 		}

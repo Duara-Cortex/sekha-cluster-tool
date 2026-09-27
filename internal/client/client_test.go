@@ -184,6 +184,68 @@ func TestBaseClient_TLSConfiguration(t *testing.T) {
 			t.Fatalf("expected HTTPS request with NewBaseClientWithTLS to succeed, got: %v", err)
 		}
 	})
+
+	t.Run("fails loudly when CA cert file is missing", func(t *testing.T) {
+		missingPath := filepath.Join(tmpDir, "missing-ca.crt")
+		client := NewBaseClient(2*time.Second, "", missingPath, false)
+		if client.TLSErr() == nil {
+			t.Fatal("expected TLSErr on client with missing CA, got nil")
+		}
+		var target map[string]interface{}
+		err := client.GetJSON(ctx, ts.URL, &target, "trc-tls-missing")
+		if err == nil {
+			t.Fatal("expected GetJSON to fail loudly with missing CA cert, got nil")
+		}
+		if !strings.Contains(err.Error(), missingPath) {
+			t.Errorf("expected error to contain path '%s', got: %v", missingPath, err)
+		}
+		if !strings.Contains(err.Error(), "no such file or directory") {
+			t.Errorf("expected error to contain OS error 'no such file or directory', got: %v", err)
+		}
+	})
+
+	t.Run("fails loudly when CA cert path is a directory", func(t *testing.T) {
+		subDir := filepath.Join(tmpDir, "ca-dir")
+		_ = os.MkdirAll(subDir, 0755)
+		client := NewBaseClient(2*time.Second, "", subDir, false)
+		if client.TLSErr() == nil {
+			t.Fatal("expected TLSErr on client with directory CA, got nil")
+		}
+		var target map[string]interface{}
+		err := client.GetJSON(ctx, ts.URL, &target, "trc-tls-dir")
+		if err == nil {
+			t.Fatal("expected GetJSON to fail loudly with directory CA, got nil")
+		}
+		if !strings.Contains(err.Error(), subDir) {
+			t.Errorf("expected error to contain path '%s', got: %v", subDir, err)
+		}
+		if !strings.Contains(err.Error(), "is a directory") {
+			t.Errorf("expected error to contain 'is a directory', got: %v", err)
+		}
+	})
+
+	t.Run("fails loudly when CA cert file contains no valid PEM certificates", func(t *testing.T) {
+		invalidPath := filepath.Join(tmpDir, "garbage.crt")
+		if err := os.WriteFile(invalidPath, []byte("NOT A VALID PEM CERTIFICATE"), 0644); err != nil {
+			t.Fatalf("failed to write invalid ca: %v", err)
+		}
+		client := NewBaseClient(2*time.Second, "", invalidPath, false)
+		if client.TLSErr() == nil {
+			t.Fatal("expected TLSErr on client with non-PEM CA, got nil")
+		}
+		var target map[string]interface{}
+		err := client.GetJSON(ctx, ts.URL, &target, "trc-tls-non-pem")
+		if err == nil {
+			t.Fatal("expected GetJSON to fail loudly with non-PEM CA, got nil")
+		}
+		if !strings.Contains(err.Error(), "contains no valid PEM certificates") {
+			t.Errorf("expected error to state 'contains no valid PEM certificates', got: %v", err)
+		}
+		expectedCmd := "openssl x509 -in " + invalidPath + " -noout -subject"
+		if !strings.Contains(err.Error(), expectedCmd) {
+			t.Errorf("expected error to suggest '%s', got: %v", expectedCmd, err)
+		}
+	})
 }
 
 func TestBaseClient_401UnauthorizedDiagnostics(t *testing.T) {

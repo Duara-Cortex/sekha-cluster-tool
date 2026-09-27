@@ -172,3 +172,111 @@ func TestFormattingHelpers(t *testing.T) {
 		t.Errorf("formatUptime(93600) = %s, want 1d 02h", got)
 	}
 }
+
+func TestProbeClusterHealth_TLSCACertFailure(t *testing.T) {
+	// Node 3 (Sensory) is healthy on HTTP
+	mockSensory := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(model.SensoryStatsResponse{
+			Status:           "healthy",
+			BufferCapacityMB: 64.0,
+			BufferUsageMB:    10.3,
+		})
+	}))
+	defer mockSensory.Close()
+
+	// Node 2 (Working) is healthy on HTTP
+	mockWorking := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(model.WorkingHealthResponse{
+			Status:         "healthy",
+			LlamaInference: "reachable",
+			Service:        "sekha-working-scratchpad",
+		})
+	}))
+	defer mockWorking.Close()
+
+	// Node 1 (Knowledge) is an HTTPS endpoint
+	knowledgeURL := "https://192.168.8.213:8084"
+
+	missingCA := "/nonexistent/ca.pem"
+	cfg := config.Config{
+		SensoryURL:      mockSensory.URL,
+		WorkingURL:      mockWorking.URL,
+		KnowledgeURL:    knowledgeURL,
+		TLSCACert:       missingCA,
+		TLSCACertSource: "--tls-ca-cert flag",
+	}
+
+	res := ProbeClusterHealth(context.Background(), cfg, 500*time.Millisecond, "trc-tls-fail")
+
+	if res.AllHealthy {
+		t.Errorf("expected AllHealthy to be false due to broken TLS CA")
+	}
+	if res.OnlineCount != 2 {
+		t.Errorf("expected 2 online nodes (HTTP sensory and working), got %d", res.OnlineCount)
+	}
+
+	kNode := res.findNode("knowledge")
+	if kNode == nil {
+		t.Fatal("expected knowledge node in probe results")
+	}
+	if kNode.Status != "unreachable" {
+		t.Errorf("expected knowledge node status 'unreachable', got '%s'", kNode.Status)
+	}
+	if !strings.Contains(kNode.Error, missingCA) {
+		t.Errorf("expected knowledge node error to contain path '%s', got: %s", missingCA, kNode.Error)
+	}
+	if !strings.Contains(kNode.Error, "--tls-ca-cert flag") {
+		t.Errorf("expected knowledge node error to contain source '--tls-ca-cert flag', got: %s", kNode.Error)
+	}
+	if !strings.Contains(kNode.Error, "no such file or directory") {
+		t.Errorf("expected knowledge node error to contain OS error, got: %s", kNode.Error)
+	}
+
+	dashboard := res.FormatDashboard()
+	if !strings.Contains(dashboard, "Cluster State: DEGRADED (2/3 Online)") {
+		t.Errorf("dashboard missing degraded cluster state:\n%s", dashboard)
+	}
+	if !strings.Contains(dashboard, missingCA) {
+		t.Errorf("dashboard missing CA cert path in error:\n%s", dashboard)
+	}
+
+	pingOut := res.FormatPing()
+	if !strings.Contains(pingOut, "[OK] Node 3 (Sensory)") {
+		t.Errorf("ping missing OK for sensory node:\n%s", pingOut)
+	}
+	if !strings.Contains(pingOut, "[OK] Node 2 (Working)") {
+		t.Errorf("ping missing OK for working node:\n%s", pingOut)
+	}
+	if !strings.Contains(pingOut, "[FAIL] Node 1 (Knowledge)") {
+		t.Errorf("ping missing FAIL for knowledge node:\n%s", pingOut)
+	}
+	if !strings.Contains(pingOut, missingCA) {
+		t.Errorf("ping missing CA cert path in knowledge error:\n%s", pingOut)
+	}
+
+	statusJSON := res.ToStatusJSON()
+	var foundKStatus bool
+	for _, n := range statusJSON.Nodes {
+		if strings.Contains(n.Name, "Knowledge") {
+			foundKStatus = true
+			if !strings.Contains(n.Error, missingCA) {
+				t.Errorf("status JSON knowledge node error missing CA path, got: %s", n.Error)
+			}
+		}
+	}
+	if !foundKStatus {
+		t.Errorf("knowledge node not found in status JSON")
+	}
+
+	pingJSON := res.ToPingJSON()
+	kPing, ok := pingJSON.Nodes["knowledge"]
+	if !ok {
+		t.Fatal("knowledge node not found in ping JSON")
+	}
+	if kPing.Reachable {
+		t.Errorf("expected knowledge node reachable false in ping JSON")
+	}
+	if !strings.Contains(kPing.Error, missingCA) {
+		t.Errorf("ping JSON knowledge node error missing CA path, got: %s", kPing.Error)
+	}
+}

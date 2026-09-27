@@ -20,7 +20,7 @@ import (
 
 var (
 	// Version is injected at link time via -ldflags or defaults to the release version.
-	Version = "v1.0.10"
+	Version = "v1.0.11"
 )
 
 // GlobalFlags captures CLI arguments specified globally across any subcommand position.
@@ -805,6 +805,10 @@ func runFilter(global GlobalFlags, args []string) {
 		outputError(traceID, err.Error())
 	}
 
+	if err := cfg.ValidateTLS(); err != nil {
+		outputError(traceID, err.Error())
+	}
+
 	if err := cfg.ValidateSensory(); err != nil {
 		outputError(traceID, err.Error())
 	}
@@ -923,6 +927,10 @@ func runRecall(global GlobalFlags, args []string) {
 		outputError(traceID, err.Error())
 	}
 
+	if err := cfg.ValidateTLS(); err != nil {
+		outputError(traceID, err.Error())
+	}
+
 	if err := cfg.ValidateKnowledge(); err != nil {
 		outputError(traceID, err.Error())
 	}
@@ -1016,6 +1024,10 @@ func runDeliberate(global GlobalFlags, args []string) {
 		DeliberateTimeout: timeout,
 	})
 	if err != nil {
+		outputError(traceID, err.Error())
+	}
+
+	if err := cfg.ValidateTLS(); err != nil {
 		outputError(traceID, err.Error())
 	}
 
@@ -1140,6 +1152,10 @@ func runConsolidate(global GlobalFlags, args []string) {
 		MaxInputBytes: *maxInputFlag,
 	})
 	if err != nil {
+		outputError(traceID, err.Error())
+	}
+
+	if err := cfg.ValidateTLS(); err != nil {
 		outputError(traceID, err.Error())
 	}
 
@@ -1374,6 +1390,10 @@ func runOrchestrate(global GlobalFlags, args []string) {
 		PromptReserve:     *promptReserveFlag,
 	})
 	if err != nil {
+		outputError(traceID, err.Error())
+	}
+
+	if err := cfg.ValidateTLS(); err != nil {
 		outputError(traceID, err.Error())
 	}
 

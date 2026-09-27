@@ -29,6 +29,7 @@ type Config struct {
 	KnowledgeURL      string        `json:"knowledge_url"`
 	APIKey            string        `json:"api_key,omitempty"`
 	TLSCACert         string        `json:"tls_ca_cert,omitempty"`
+	TLSCACertSource   string        `json:"tls_ca_cert_source,omitempty"`
 	Insecure          bool          `json:"insecure,omitempty"`
 	DefaultTimeout    time.Duration `json:"default_timeout"`
 	DeliberateTimeout time.Duration `json:"deliberate_timeout"`
@@ -176,8 +177,16 @@ func Load(flags FlagOverrides) (*Config, error) {
 		}
 	}
 
-	if val := getEnv("CLUSTER_TLS_CA_CERT", ""); val != "" {
-		cfg.TLSCACert = val
+	if val, exists := os.LookupEnv("CLUSTER_TLS_CA_CERT"); exists && strings.TrimSpace(val) != "" {
+		cfg.TLSCACert = strings.TrimSpace(val)
+		cfg.TLSCACertSource = "environment variable CLUSTER_TLS_CA_CERT"
+	} else if val, exists := fileEnv["CLUSTER_TLS_CA_CERT"]; exists && strings.TrimSpace(val) != "" {
+		cfg.TLSCACert = strings.TrimSpace(val)
+		if cfg.EnvFileLoaded != "" {
+			cfg.TLSCACertSource = fmt.Sprintf(".env file (%s)", cfg.EnvFileLoaded)
+		} else {
+			cfg.TLSCACertSource = ".env file"
+		}
 	}
 	if val := getEnv("CLUSTER_INSECURE", ""); val != "" {
 		if b, err := strconv.ParseBool(val); err == nil {
@@ -203,6 +212,7 @@ func Load(flags FlagOverrides) (*Config, error) {
 	}
 	if flags.TLSCACert != "" {
 		cfg.TLSCACert = flags.TLSCACert
+		cfg.TLSCACertSource = "--tls-ca-cert flag"
 	}
 	if flags.Insecure {
 		cfg.Insecure = true
