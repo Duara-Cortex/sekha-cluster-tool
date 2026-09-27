@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,7 +57,8 @@ func TestOrchestrator_FullCycleSuccess(t *testing.T) {
 							Label:      "Core Thermal Threshold",
 							Summary:    "Core temperature above 80C requires fan speed increase to level 3.",
 						},
-						Score: 0.95,
+						Score:    0.95,
+						SimScore: 0.82,
 					},
 				},
 				QueryLatencyMS: 1.25,
@@ -84,8 +86,10 @@ func TestOrchestrator_FullCycleSuccess(t *testing.T) {
 	defer node1Server.Close()
 
 	// Mock Node 2 (Working Scratchpad Deliberation)
+	var capturedDelibReq model.DeliberateRequest
 	node2Server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedTraceIDs = append(receivedTraceIDs, r.Header.Get(telemetry.HeaderTraceID))
+		_ = json.NewDecoder(r.Body).Decode(&capturedDelibReq)
 		w.Header().Set("Content-Type", "application/json")
 
 		resp := model.DeliberateResponse{
@@ -152,6 +156,9 @@ func TestOrchestrator_FullCycleSuccess(t *testing.T) {
 	}
 	if len(res.Stages) != 4 {
 		t.Fatalf("expected 4 stage telemetry entries, got %d", len(res.Stages))
+	}
+	if len(capturedDelibReq.LongTermContext) != 1 || !strings.Contains(capturedDelibReq.LongTermContext[0], "Core Thermal Threshold") {
+		t.Errorf("expected the relevant recalled fact to reach Node 2, got %v (gate: %+v)", capturedDelibReq.LongTermContext, res.Stages[1].RelevanceGate)
 	}
 	for i, stage := range res.Stages {
 		if stage.Status != "success" {
