@@ -373,3 +373,42 @@ CLUSTER_INSECURE=true
 	}
 }
 
+
+func TestConfig_StageTimeoutPrecedence(t *testing.T) {
+	envPath := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(envPath, []byte("CLUSTER_CONSOLIDATE_TIMEOUT_MS=45000\nCLUSTER_SENSORY_TIMEOUT_MS=7000\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLUSTER_CONSOLIDATE_TIMEOUT_MS", "")
+	t.Setenv("CLUSTER_SENSORY_TIMEOUT_MS", "")
+
+	empty := filepath.Join(t.TempDir(), "empty.env")
+	_ = os.WriteFile(empty, nil, 0644)
+	cfg, err := Load(FlagOverrides{EnvPath: empty})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ConsolidateTimeout != DefaultConsolidateTimeout || cfg.ConsolidateSource != "default" ||
+		cfg.SensoryTimeout != DefaultSensoryTimeout || cfg.SensorySource != "default" {
+		t.Errorf("defaults: consolidate %v (%s), sensory %v (%s)", cfg.ConsolidateTimeout, cfg.ConsolidateSource, cfg.SensoryTimeout, cfg.SensorySource)
+	}
+
+	cfg, _ = Load(FlagOverrides{EnvPath: envPath})
+	if cfg.ConsolidateTimeout != 45*time.Second || cfg.ConsolidateSource != "CLUSTER_CONSOLIDATE_TIMEOUT_MS in .env file ("+envPath+")" {
+		t.Errorf(".env: %v (%s)", cfg.ConsolidateTimeout, cfg.ConsolidateSource)
+	}
+	if cfg.SensoryTimeout != 7*time.Second {
+		t.Errorf(".env sensory: %v", cfg.SensoryTimeout)
+	}
+
+	t.Setenv("CLUSTER_CONSOLIDATE_TIMEOUT_MS", "90000")
+	cfg, _ = Load(FlagOverrides{EnvPath: envPath})
+	if cfg.ConsolidateTimeout != 90*time.Second || cfg.ConsolidateSource != "environment variable CLUSTER_CONSOLIDATE_TIMEOUT_MS" {
+		t.Errorf("OS env: %v (%s)", cfg.ConsolidateTimeout, cfg.ConsolidateSource)
+	}
+
+	cfg, _ = Load(FlagOverrides{EnvPath: envPath, ConsolidateTimeout: 3 * time.Second, ConsolidateTimeoutFlag: "--consolidate-timeout"})
+	if cfg.ConsolidateTimeout != 3*time.Second || cfg.ConsolidateSource != "--consolidate-timeout flag" {
+		t.Errorf("flag: %v (%s)", cfg.ConsolidateTimeout, cfg.ConsolidateSource)
+	}
+}

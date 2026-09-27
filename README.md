@@ -70,6 +70,10 @@ CLUSTER_API_KEY=
 # Timeout Budgets (milliseconds)
 CLUSTER_DEFAULT_TIMEOUT_MS=1500
 CLUSTER_DELIBERATE_TIMEOUT_MS=8000
+# Node 3 filter deadline (filter, orchestrate stage 1; default 30000)
+CLUSTER_SENSORY_TIMEOUT_MS=30000
+# Node 1 consolidate deadline (consolidate, orchestrate stage 4; default 120000)
+CLUSTER_CONSOLIDATE_TIMEOUT_MS=120000
 
 # Attention & Recall Parameters
 CLUSTER_SALIENCE_THRESHOLD=0.45
@@ -208,6 +212,8 @@ sekha-cluster-tool filter \
   --threshold 0.45
 ```
 
+By default `filter` prints counts only (`total_chunks`, `salient_chunks`, `noise_discarded`, `reduction_rate`, `latency_ms`, `chunks_omitted`), because the chunk text is the input split up and would make the output as large as the input. Pass `--full` to get every chunk with its text and salience.
+
 ### 4. Associative Recall (`recall`)
 Queries the relational knowledge graph for contextual entities (returns lean schema without embeddings by default):
 
@@ -272,18 +278,48 @@ sekha-cluster-tool orchestrate \
   --sync
 ```
 
+#### Output, status and exit code
+The default output is concise: a few KB for any input up to the 1 MiB cap. These fields come first, in this order:
+
+| Field | Meaning |
+|---|---|
+| `status` | `completed` (no stage failed), `partial` (some stages failed), `failed` (every stage failed) |
+| `is_complete` | Node 2's own deliberation flag. It does **not** mean the loop completed. |
+| `stages[]` | `stage_name`, `status` (`success` / `failed`, or `over_budget` for stage 3), `error`, `duration_ms` |
+| `final_thought`, `proposed_action` | Node 2's step |
+| `trace_id`, `session_id`, `total_duration_ms` | |
+| `loop_complete` | `true` only when all four stages report `success` |
+
+Then come counts-only summaries: `sensory` (chunk counts, reduction rate, latency; no chunk text), `recall` (node and edge counts, latency, and the relevance gate's thresholds and `nodes_in` / `nodes_kept` / `nodes_dropped`), `deliberation` (status, token counts and rates, context-budget counts) and `consolidation` (status, `synchronous`, entity/node/edge counts, message). Error and message text is capped at 300 bytes.
+
+`--full` (for operators) prints the complete response instead: chunk text, recalled nodes, the per-node `kept[]`/`dropped[]` gate decisions and the packing decisions.
+
+Exit codes: `0` when `status` is `completed`, `2` when it is `partial` or `failed` (the JSON result is still printed on stdout), and `1` for errors that stop the cycle before it runs (the `{"status":"error",...}` shape). A stage 3 `over_budget` result counts as having run: `status` stays `completed` and the exit code is 0, but `loop_complete` is `false`.
+
+#### Stage deadlines
+Each stage takes its deadline from config (flag > OS env > `.env` > default):
+
+| Stage | Setting | Default |
+|---|---|---|
+| 1 sensory filter | `--sensory-timeout`, `CLUSTER_SENSORY_TIMEOUT_MS` | 30s |
+| 2 recall | `--timeout`, `CLUSTER_DEFAULT_TIMEOUT_MS` | 1.5s |
+| 3 deliberate | `CLUSTER_DELIBERATE_TIMEOUT_MS` (floor, widened for prompt size and `--max-tokens`) | 8s |
+| 4 consolidate | `--consolidate-timeout`, `CLUSTER_CONSOLIDATE_TIMEOUT_MS` | 120s |
+
+Standalone `filter` and `consolidate` use the same sensory and consolidate settings, and there `--timeout` sets that deadline too. When a deadline expires, the error names the value and where it came from, e.g. `consolidate deadline of 9s exceeded (set by CLUSTER_CONSOLIDATE_TIMEOUT_MS in .env file (/path/.env); ...)`.
+
 #### Relevance gating (Stage 2 → Stage 3)
 Recalled nodes pass to Node 2 only if all of these hold:
 - `sim_score` ≥ `--min-sim` (default `0.50`, env `CLUSTER_RECALL_MIN_SIM`). The blended `score` is not used, because recency and anchor boosts lift the episode the previous cycle just consolidated. Nodes with no `sim_score` (anchor-only hits in Node 1's lean schema) are admitted only if they match a requested anchor and pass the term check below.
 - When `-a` anchors are given and the node lists anchors, at least one of them matches.
 - The node's distinctive terms overlap the current input. At least 2 terms and 15% of the node's terms must appear in the input, and the directive's own words don't count toward this.
 
-The recall query is the directive plus an excerpt of up to 512 runes from the most salient chunk. `stages[1].relevance_gate` lists every kept and dropped node with its `sim_score`, term overlap and drop reason (`missing_sim_score`, `below_sim_floor`, `anchor_mismatch`, `insufficient_term_overlap`). `recall.nodes` in the output contains only the kept nodes.
+The recall query is the directive plus an excerpt of up to 512 runes from the most salient chunk. With `--full`, `stages[1].relevance_gate` lists every kept and dropped node with its `sim_score`, term overlap and drop reason (`missing_sim_score`, `below_sim_floor`, `anchor_mismatch`, `insufficient_term_overlap`). `recall.nodes` in the output contains only the kept nodes.
 
 #### Node 2 context budget (Stage 3)
 The prompt budget is `--context-tokens` (default `4096`, env `CLUSTER_DELIBERATE_CONTEXT_TOKENS`) minus `--max-tokens`, minus `--prompt-reserve` (default `384`, env `CLUSTER_DELIBERATE_PROMPT_RESERVE`) for the Node 2 template. Tokens are estimated conservatively, erring high: every digit, symbol and non-ASCII byte pair counts as one token. Recalled facts get at most a quarter of the budget, ranked by `sim_score`. Chunks fill the rest in salience order. The first chunk that doesn't fit is truncated and lower ranked chunks are dropped. Kept chunks go to Node 2 in their original order.
 
-`stages[2].context_budget` reports the budget, the estimated prompt tokens, Node 2's reported `prompt_tokens`, `within_budget`, and each truncation or drop with its token counts. If the objective alone can't fit, nothing is sent to Node 2 and the stage fails with an explicit error. Stage 4 still consolidates the full, untruncated sensory stream.
+With `--full`, `stages[2].context_budget` reports the budget, the estimated prompt tokens, Node 2's reported `prompt_tokens`, `within_budget`, and each truncation or drop with its token counts. If the objective alone can't fit, nothing is sent to Node 2 and the stage fails with an explicit error. Stage 4 still consolidates the full, untruncated sensory stream.
 
 ---
 
@@ -299,7 +335,7 @@ sekha-cluster-tool orchestrate --task "Answer from the transcript" \
 - **OS limits:** Linux caps a single argument at 128 KiB (`MAX_ARG_STRLEN`) and rejects larger ones before the CLI starts, so split anything larger into ≤120 KiB parts. macOS allows a single argument of 256 KB+ but caps all arguments plus the environment at about 1 MiB (`ARG_MAX`).
 - **Input cap:** the combined input from inline flags, `--file` or stdin (`--file -`) is capped at 1 MiB. Raise it with `--max-input-bytes` or `CLUSTER_MAX_INPUT_BYTES`. Input over the cap fails with an actionable error before anything is sent. It is **never truncated**.
 - **`--file`** is an optional convenience for human operators. It can't be combined with inline input.
-- **Timeouts:** requests over 64 KiB get a deadline of at least 5s + 2s per 64 KiB (for example 21s for 500 KB). The Node 2 deadline scales with the packed prompt size and `--max-tokens`.
+- **Timeouts:** the Node 3 filter and Node 1 consolidate deadlines come from `CLUSTER_SENSORY_TIMEOUT_MS` and `CLUSTER_CONSOLIDATE_TIMEOUT_MS` (see [Stage deadlines](#stage-deadlines)); set them in `.env` for your cluster and payload sizes. The Node 2 deadline scales with the packed prompt size and `--max-tokens`.
 
 ---
 

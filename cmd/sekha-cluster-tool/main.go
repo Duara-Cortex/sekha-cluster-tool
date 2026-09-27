@@ -519,6 +519,24 @@ Orchestrate Relevance & Budget:
   --context-tokens <n>       Node 2 context window (default 4096, env CLUSTER_DELIBERATE_CONTEXT_TOKENS)
   --prompt-reserve <n>       Tokens reserved for Node 2 prompt template (default 384, env CLUSTER_DELIBERATE_PROMPT_RESERVE)
 
+Orchestrate Output & Exit Codes:
+  Default output is concise (a few KB for any input): status, is_complete, stages[],
+  final_thought, proposed_action, trace_id, session_id, total_duration_ms, loop_complete,
+  then counts-only sensory/recall/deliberation/consolidation summaries.
+  --full                     Operators only: full output with chunk text, recalled nodes and
+                             per-node gate/packing decisions (also on filter)
+  status                     "completed" (no stage failed), "partial" (some failed), "failed" (all failed)
+  loop_complete              true only when all four stages report "success"
+  is_complete                Node 2's own deliberation flag; it does not mean the loop completed
+  Exit codes: 0 completed, 1 error (no cycle output), 2 partial/failed cycle (JSON still on stdout)
+
+Stage Deadlines (flag > env > default):
+  --sensory-timeout <dur>      Node 3 filter deadline (filter, orchestrate stage 1; env CLUSTER_SENSORY_TIMEOUT_MS, default 30s)
+  --consolidate-timeout <dur>  Node 1 consolidate deadline (consolidate, orchestrate stage 4; env CLUSTER_CONSOLIDATE_TIMEOUT_MS, default 120s)
+  On filter and consolidate, --timeout also sets that deadline. On orchestrate, --timeout sets
+  only the recall deadline (CLUSTER_DEFAULT_TIMEOUT_MS); deliberation uses CLUSTER_DELIBERATE_TIMEOUT_MS
+  as a floor, widened for the packed prompt size.
+
 Environment Variables (.env / OS):
   CLUSTER_ENV_FILE       Path to custom .env configuration file
   CLUSTER_SENSORY_URL    Sensory Buffer base URL (fallback: SEKHA_NODE3_URL)
@@ -527,6 +545,10 @@ Environment Variables (.env / OS):
   CLUSTER_API_KEY        Node 1 API Key (fallback: SEKHA_API_KEY)
   CLUSTER_TLS_CA_CERT    Custom root CA certificate path for HTTPS
   CLUSTER_INSECURE       Skip TLS certificate verification (true/false)
+  CLUSTER_DEFAULT_TIMEOUT_MS         Recall and general request deadline in ms (default 1500)
+  CLUSTER_DELIBERATE_TIMEOUT_MS      Node 2 deliberation deadline floor in ms (default 8000)
+  CLUSTER_SENSORY_TIMEOUT_MS         Node 3 filter deadline in ms (default 30000)
+  CLUSTER_CONSOLIDATE_TIMEOUT_MS     Node 1 consolidate deadline in ms (default 120000)
   CLUSTER_MAX_INPUT_BYTES            Combined payload cap in bytes (default 1048576)
   CLUSTER_RECALL_MIN_SIM             Relevance gate sim_score floor (default 0.50)
   CLUSTER_DELIBERATE_CONTEXT_TOKENS  Node 2 context window in tokens (default 4096)
@@ -774,7 +796,9 @@ func runFilter(global GlobalFlags, args []string) {
 	tlsCACertFlag := fs.String("tls-ca-cert", "", "Path to custom root CA certificate")
 	insecureFlag := fs.Bool("insecure", false, "Skip TLS certificate verification")
 	envFileFlag := fs.String("env-file", "", "Path to .env configuration file")
-	timeoutFlag := fs.Duration("timeout", 0, "Operation timeout budget")
+	timeoutFlag := fs.Duration("timeout", 0, "Node 3 filter deadline (same as --sensory-timeout)")
+	sensoryTimeoutFlag := fs.Duration("sensory-timeout", 0, "Node 3 filter deadline (env CLUSTER_SENSORY_TIMEOUT_MS, default 30s)")
+	fullFlag := fs.Bool("full", false, "Operators only: include every chunk's text (default output is counts only)")
 	traceIDFlag := fs.String("trace-id", "", "Distributed trace ID")
 	verboseFlag := fs.Bool("verbose", false, "Enable stderr diagnostic logs")
 	_ = fs.Parse(args)
@@ -786,20 +810,22 @@ func runFilter(global GlobalFlags, args []string) {
 		traceID = telemetry.GenerateTraceID()
 	}
 
-	timeout := *timeoutFlag
-	if timeout == 0 && global.Timeout > 0 {
-		timeout = global.Timeout
-	}
+	sensoryTimeout, sensoryTimeoutName := firstDuration(
+		namedDuration{*sensoryTimeoutFlag, "--sensory-timeout"},
+		namedDuration{*timeoutFlag, "--timeout"},
+		namedDuration{global.Timeout, "--timeout"},
+	)
 
 	cfg, err := config.Load(config.FlagOverrides{
-		EnvPath:           pickURL(*envFileFlag, global.EnvPath),
-		SensoryURL:        pickURL(*sensoryURLFlag, *node3URLFlag, global.SensoryURL),
-		APIKey:            pickURL(*apiKeyFlag, *tokenFlag, *keyFlag, global.APIKey),
-		TLSCACert:         pickURL(*tlsCACertFlag, global.TLSCACert),
-		Insecure:          *insecureFlag || global.Insecure,
-		Timeout:           timeout,
-		SalienceThreshold: *thresholdFlag,
-		MaxInputBytes:     *maxInputFlag,
+		EnvPath:            pickURL(*envFileFlag, global.EnvPath),
+		SensoryURL:         pickURL(*sensoryURLFlag, *node3URLFlag, global.SensoryURL),
+		APIKey:             pickURL(*apiKeyFlag, *tokenFlag, *keyFlag, global.APIKey),
+		TLSCACert:          pickURL(*tlsCACertFlag, global.TLSCACert),
+		Insecure:           *insecureFlag || global.Insecure,
+		SensoryTimeout:     sensoryTimeout,
+		SensoryTimeoutFlag: sensoryTimeoutName,
+		SalienceThreshold:  *thresholdFlag,
+		MaxInputBytes:      *maxInputFlag,
 	})
 	if err != nil {
 		outputError(traceID, err.Error())
@@ -822,9 +848,9 @@ func runFilter(global GlobalFlags, args []string) {
 		outputError(traceID, "Must provide either --text, --file, or --from-buffer")
 	}
 
-	requestTimeout := client.PayloadTimeout(cfg.DefaultTimeout, len(text))
-	sensoryClient := client.NewSensoryClient(cfg.SensoryURL, requestTimeout, cfg.TLSCACert, cfg.Insecure)
-	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	// The deadline is applied through ctx only, so a timeout is reported with its configured source.
+	sensoryClient := client.NewSensoryClient(cfg.SensoryURL, 0, cfg.TLSCACert, cfg.Insecure)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.SensoryTimeout)
 	defer cancel()
 
 	req := model.FilterRequest{
@@ -835,11 +861,41 @@ func runFilter(global GlobalFlags, args []string) {
 	}
 
 	resp, err := sensoryClient.Filter(ctx, req, traceID)
+	err = client.WithDeadline(ctx, err, "sensory filter", cfg.SensoryTimeout, cfg.SensorySource, "CLUSTER_SENSORY_TIMEOUT_MS")
 	if err != nil {
 		outputError(traceID, err.Error())
 	}
 
-	outputJSON(resp)
+	if *fullFlag {
+		outputJSON(resp)
+		return
+	}
+	// Chunk text is the caller's own payload split up; echoing it makes output as large as the input.
+	outputJSON(filterSummary{
+		SensorySummary: resp.Summary(),
+		ChunksOmitted:  len(resp.Chunks),
+	})
+}
+
+// filterSummary is the default filter output: counts only, chunk text behind --full.
+type filterSummary struct {
+	model.SensorySummary
+	ChunksOmitted int `json:"chunks_omitted"`
+}
+
+type namedDuration struct {
+	d    time.Duration
+	name string
+}
+
+// firstDuration returns the first positive duration and the flag name that supplied it.
+func firstDuration(candidates ...namedDuration) (time.Duration, string) {
+	for _, c := range candidates {
+		if c.d > 0 {
+			return c.d, c.name
+		}
+	}
+	return 0, ""
 }
 
 // runRecall handles the 'recall' subcommand.
@@ -1119,7 +1175,8 @@ func runConsolidate(global GlobalFlags, args []string) {
 	tlsCACertFlag := fs.String("tls-ca-cert", "", "Path to custom root CA certificate")
 	insecureFlag := fs.Bool("insecure", false, "Skip TLS certificate verification")
 	envFileFlag := fs.String("env-file", "", "Path to .env configuration file")
-	timeoutFlag := fs.Duration("timeout", 0, "Operation timeout budget")
+	timeoutFlag := fs.Duration("timeout", 0, "Node 1 consolidate deadline (same as --consolidate-timeout)")
+	consolidateTimeoutFlag := fs.Duration("consolidate-timeout", 0, "Node 1 consolidate deadline (env CLUSTER_CONSOLIDATE_TIMEOUT_MS, default 120s)")
 	traceIDFlag := fs.String("trace-id", "", "Distributed trace ID")
 	verboseFlag := fs.Bool("verbose", false, "Enable stderr diagnostic logs")
 	var anchorFlags anchorSliceFlag
@@ -1137,19 +1194,21 @@ func runConsolidate(global GlobalFlags, args []string) {
 
 	anchors := model.ParseAnchors(append(global.Anchors, anchorFlags...)...)
 
-	timeout := *timeoutFlag
-	if timeout == 0 && global.Timeout > 0 {
-		timeout = global.Timeout
-	}
+	consolidateTimeout, consolidateTimeoutName := firstDuration(
+		namedDuration{*consolidateTimeoutFlag, "--consolidate-timeout"},
+		namedDuration{*timeoutFlag, "--timeout"},
+		namedDuration{global.Timeout, "--timeout"},
+	)
 
 	cfg, err := config.Load(config.FlagOverrides{
-		EnvPath:       pickURL(*envFileFlag, global.EnvPath),
-		KnowledgeURL:  pickURL(*knowledgeURLFlag, *node1URLFlag, global.KnowledgeURL),
-		APIKey:        pickURL(*apiKeyFlag, *tokenFlag, *keyFlag, global.APIKey),
-		TLSCACert:     pickURL(*tlsCACertFlag, global.TLSCACert),
-		Insecure:      *insecureFlag || global.Insecure,
-		Timeout:       timeout,
-		MaxInputBytes: *maxInputFlag,
+		EnvPath:                pickURL(*envFileFlag, global.EnvPath),
+		KnowledgeURL:           pickURL(*knowledgeURLFlag, *node1URLFlag, global.KnowledgeURL),
+		APIKey:                 pickURL(*apiKeyFlag, *tokenFlag, *keyFlag, global.APIKey),
+		TLSCACert:              pickURL(*tlsCACertFlag, global.TLSCACert),
+		Insecure:               *insecureFlag || global.Insecure,
+		ConsolidateTimeout:     consolidateTimeout,
+		ConsolidateTimeoutFlag: consolidateTimeoutName,
+		MaxInputBytes:          *maxInputFlag,
 	})
 	if err != nil {
 		outputError(traceID, err.Error())
@@ -1294,16 +1353,19 @@ func runConsolidate(global GlobalFlags, args []string) {
 		req.IsSecret = true
 	}
 
-	requestTimeout := client.PayloadTimeout(cfg.DefaultTimeout, len(traceContent)+len(inputText)+positionalBytes)
-	knowledgeClient := client.NewKnowledgeClient(cfg.KnowledgeURL, requestTimeout, cfg.APIKey, cfg.TLSCACert, cfg.Insecure)
-	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	// The deadline is applied through ctx only, so a timeout is reported with its configured source.
+	knowledgeClient := client.NewKnowledgeClient(cfg.KnowledgeURL, 0, cfg.APIKey, cfg.TLSCACert, cfg.Insecure)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.ConsolidateTimeout)
 	defer cancel()
 
 	resp, err := knowledgeClient.Consolidate(ctx, req, traceID)
+	err = client.WithDeadline(ctx, err, "consolidate", cfg.ConsolidateTimeout, cfg.ConsolidateSource, "CLUSTER_CONSOLIDATE_TIMEOUT_MS")
 	if err != nil {
 		outputError(traceID, err.Error())
 	}
 
+	// Node 1 echoes no payload text; only the message is capped.
+	resp.Message = model.CapText(resp.Message, 1024)
 	outputJSON(resp)
 }
 
@@ -1346,6 +1408,9 @@ func runOrchestrate(global GlobalFlags, args []string) {
 	fs.Var(&anchorFlags, "a", "Target anchor tag alias")
 	anchorModeFlag := fs.String("anchor-mode", "boost", "Anchor recall mode: boost or filter (default: boost)")
 	includeEmbeddingsFlag := fs.Bool("include-embeddings", false, "Include vector embeddings in recall results (default: false)")
+	sensoryTimeoutFlag := fs.Duration("sensory-timeout", 0, "Stage 1 Node 3 filter deadline (env CLUSTER_SENSORY_TIMEOUT_MS, default 30s)")
+	consolidateTimeoutFlag := fs.Duration("consolidate-timeout", 0, "Stage 4 Node 1 consolidate deadline (env CLUSTER_CONSOLIDATE_TIMEOUT_MS, default 120s)")
+	fullFlag := fs.Bool("full", false, "Operators only: full output with chunk text, recalled nodes and per-node decisions")
 	_, _ = parseFlagSetWithPositionals(fs, args)
 
 	verbose := global.Verbose || *verboseFlag
@@ -1373,21 +1438,25 @@ func runOrchestrate(global GlobalFlags, args []string) {
 	timeout := global.Timeout
 
 	cfg, err := config.Load(config.FlagOverrides{
-		EnvPath:           pickURL(*envFileFlag, global.EnvPath),
-		SensoryURL:        pickURL(*sensoryURLFlag, *node3URLFlag, global.SensoryURL),
-		WorkingURL:        pickURL(*workingURLFlag, *node2URLFlag, *orchestrationURLFlag, global.WorkingURL, global.OrchestrationURL),
-		KnowledgeURL:      pickURL(*knowledgeURLFlag, *node1URLFlag, global.KnowledgeURL),
-		OrchestrationURL:  pickURL(*orchestrationURLFlag, global.OrchestrationURL),
-		APIKey:            pickURL(*apiKeyFlag, *tokenFlag, *keyFlag, global.APIKey),
-		TLSCACert:         pickURL(*tlsCACertFlag, global.TLSCACert),
-		Insecure:          *insecureFlag || global.Insecure,
-		Timeout:           timeout,
-		SalienceThreshold: *thresholdFlag,
-		RecallTopK:        *topKFlag,
-		RecallMinSim:      *minSimFlag,
-		MaxInputBytes:     *maxInputFlag,
-		ContextTokens:     *contextTokensFlag,
-		PromptReserve:     *promptReserveFlag,
+		EnvPath:                pickURL(*envFileFlag, global.EnvPath),
+		SensoryURL:             pickURL(*sensoryURLFlag, *node3URLFlag, global.SensoryURL),
+		WorkingURL:             pickURL(*workingURLFlag, *node2URLFlag, *orchestrationURLFlag, global.WorkingURL, global.OrchestrationURL),
+		KnowledgeURL:           pickURL(*knowledgeURLFlag, *node1URLFlag, global.KnowledgeURL),
+		OrchestrationURL:       pickURL(*orchestrationURLFlag, global.OrchestrationURL),
+		APIKey:                 pickURL(*apiKeyFlag, *tokenFlag, *keyFlag, global.APIKey),
+		TLSCACert:              pickURL(*tlsCACertFlag, global.TLSCACert),
+		Insecure:               *insecureFlag || global.Insecure,
+		Timeout:                timeout,
+		SensoryTimeout:         *sensoryTimeoutFlag,
+		SensoryTimeoutFlag:     "--sensory-timeout",
+		ConsolidateTimeout:     *consolidateTimeoutFlag,
+		ConsolidateTimeoutFlag: "--consolidate-timeout",
+		SalienceThreshold:      *thresholdFlag,
+		RecallTopK:             *topKFlag,
+		RecallMinSim:           *minSimFlag,
+		MaxInputBytes:          *maxInputFlag,
+		ContextTokens:          *contextTokensFlag,
+		PromptReserve:          *promptReserveFlag,
 	})
 	if err != nil {
 		outputError(traceID, err.Error())
@@ -1439,8 +1508,20 @@ func runOrchestrate(global GlobalFlags, args []string) {
 		outputError(traceID, err.Error())
 	}
 
-	outputJSON(resp)
+	if *fullFlag {
+		outputJSON(resp)
+	} else {
+		outputJSON(resp.Concise())
+	}
+	if resp.Status != "completed" {
+		fmt.Fprintf(os.Stderr, "orchestrate: cycle %s; see stages[] for the failed stage(s)\n", resp.Status)
+		osExit(exitCycleIncomplete)
+	}
 }
+
+// exitCycleIncomplete is the exit code when orchestrate ran but a stage failed. Exit 1 stays
+// reserved for errors that produce the outputError shape.
+const exitCycleIncomplete = 2
 
 // runStatus queries and aggregates operational health across configured cluster endpoints.
 func runStatus(global GlobalFlags, args []string) int {

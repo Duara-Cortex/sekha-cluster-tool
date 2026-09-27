@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -17,21 +18,18 @@ import (
 )
 
 const (
-	// largePayloadBytes is the request size above which PayloadTimeout widens the deadline.
-	largePayloadBytes = 64 << 10
 	// maxErrorBodyBytes bounds how much of a response body is echoed into error messages.
 	maxErrorBodyBytes = 2048
 )
 
-// PayloadTimeout returns the deadline for a request carrying payloadBytes of body. Payloads up to
-// 64 KiB keep base; larger ones get 5s plus 2s per started 64 KiB, and never less than base.
-// A 500 KB payload therefore gets at least 21s.
-func PayloadTimeout(base time.Duration, payloadBytes int) time.Duration {
-	if payloadBytes <= largePayloadBytes {
-		return base
+// WithDeadline explains a deadline failure: when ctx expired, err is wrapped with the deadline
+// used and where it was configured, so operators know which setting to raise. Other errors pass
+// through unchanged.
+func WithDeadline(ctx context.Context, err error, operation string, d time.Duration, source, envKey string) error {
+	if err == nil || !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return err
 	}
-	blocks := (payloadBytes + largePayloadBytes - 1) / largePayloadBytes
-	return max(base, 5*time.Second+time.Duration(blocks)*2*time.Second)
+	return fmt.Errorf("%s deadline of %s exceeded (set by %s; raise %s or pass a larger flag value): %w", operation, d, source, envKey, err)
 }
 
 // DeliberationTimeout returns the Node 2 deadline for a prompt of promptTokens generating up to

@@ -236,3 +236,29 @@ func TestOrchestrator_SensoryFallbackOnFailure(t *testing.T) {
 		t.Errorf("expected deliberation to proceed despite sensory stage failure")
 	}
 }
+
+func TestCycleOutcome(t *testing.T) {
+	stages := func(statuses ...string) []model.StageTelemetry {
+		var out []model.StageTelemetry
+		for _, s := range statuses {
+			out = append(out, model.StageTelemetry{Status: s})
+		}
+		return out
+	}
+	cases := []struct {
+		in           []model.StageTelemetry
+		status       string
+		loopComplete bool
+	}{
+		{stages("success", "success", "success", "success"), "completed", true},
+		{stages("success", "success", "over_budget", "success"), "completed", false},
+		{stages("success", "success", "success", "failed"), "partial", false},
+		{stages("failed", "failed", "failed", "failed"), "failed", false},
+	}
+	for _, tc := range cases {
+		status, loop := cycleOutcome(tc.in)
+		if status != tc.status || loop != tc.loopComplete {
+			t.Errorf("cycleOutcome(%v) = %s/%v, want %s/%v", tc.in, status, loop, tc.status, tc.loopComplete)
+		}
+	}
+}
