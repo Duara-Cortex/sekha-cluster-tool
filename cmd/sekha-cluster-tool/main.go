@@ -20,7 +20,7 @@ import (
 
 var (
 	// Version is injected at link time via -ldflags or defaults to the release version.
-	Version = "v1.0.12"
+	Version = "v1.0.13"
 )
 
 // GlobalFlags captures CLI arguments specified globally across any subcommand position.
@@ -516,8 +516,12 @@ Large Payloads (filter/orchestrate/consolidate --input/--text, consolidate --tra
 
 Orchestrate Relevance & Budget:
   --min-sim <score>          Minimum recall sim_score passed to Node 2 (default 0.50, env CLUSTER_RECALL_MIN_SIM)
-  --context-tokens <n>       Node 2 context window (default 4096, env CLUSTER_DELIBERATE_CONTEXT_TOKENS)
-  --prompt-reserve <n>       Tokens reserved for Node 2 prompt template (default 384, env CLUSTER_DELIBERATE_PROMPT_RESERVE)
+  --context-tokens <n>       Node 2 context window; match Node 2's n_ctx (default 4096, env CLUSTER_DELIBERATE_CONTEXT_TOKENS)
+  --output-reserve <n>       Completion tokens Node 2 reserves; match Node 2's OutputReserve (default 512, env CLUSTER_DELIBERATE_OUTPUT_RESERVE)
+  --prompt-reserve <n>       Tokens reserved for Node 2 prompt template (default 256, env CLUSTER_DELIBERATE_PROMPT_RESERVE)
+  Chunks are packed into context - max(output reserve, --max-tokens) - prompt reserve and sent with
+  prepacked=true. deliberation.context_budget reports the tool's packing and Node 2's context_usage
+  (node2_usage "reported" or "unknown" for older Node 2 builds).
 
 Orchestrate Output & Exit Codes:
   Default output is concise (a few KB for any input): status, is_complete, stages[],
@@ -551,8 +555,9 @@ Environment Variables (.env / OS):
   CLUSTER_CONSOLIDATE_TIMEOUT_MS     Node 1 consolidate deadline in ms (default 120000)
   CLUSTER_MAX_INPUT_BYTES            Combined payload cap in bytes (default 1048576)
   CLUSTER_RECALL_MIN_SIM             Relevance gate sim_score floor (default 0.50)
-  CLUSTER_DELIBERATE_CONTEXT_TOKENS  Node 2 context window in tokens (default 4096)
-  CLUSTER_DELIBERATE_PROMPT_RESERVE  Node 2 prompt template reserve in tokens (default 384)
+  CLUSTER_DELIBERATE_CONTEXT_TOKENS  Node 2 context window in tokens; match Node 2's n_ctx (default 4096)
+  CLUSTER_DELIBERATE_OUTPUT_RESERVE  Node 2 completion reserve in tokens; match Node 2's OutputReserve (default 512)
+  CLUSTER_DELIBERATE_PROMPT_RESERVE  Node 2 prompt template reserve in tokens (default 256)
 `, Version)
 }
 
@@ -1379,8 +1384,9 @@ func runOrchestrate(global GlobalFlags, args []string) {
 	fileFlag := fs.String("file", "", "Path to raw input file (or '-' for stdin); convenience for human operators")
 	maxInputFlag := fs.Int("max-input-bytes", 0, "Maximum combined input size in bytes (default 1048576)")
 	minSimFlag := fs.Float64("min-sim", 0, "Relevance gate: minimum recall sim_score to reach Node 2 (default 0.50)")
-	contextTokensFlag := fs.Int("context-tokens", 0, "Node 2 context window in tokens (default 4096)")
-	promptReserveFlag := fs.Int("prompt-reserve", 0, "Tokens reserved for the Node 2 prompt template (default 384)")
+	contextTokensFlag := fs.Int("context-tokens", 0, "Node 2 context window in tokens (default 4096, env CLUSTER_DELIBERATE_CONTEXT_TOKENS)")
+	outputReserveFlag := fs.Int("output-reserve", 0, "Completion tokens Node 2 reserves (default 512, env CLUSTER_DELIBERATE_OUTPUT_RESERVE)")
+	promptReserveFlag := fs.Int("prompt-reserve", 0, "Tokens reserved for the Node 2 prompt template (default 256, env CLUSTER_DELIBERATE_PROMPT_RESERVE)")
 	directiveFlag := fs.String("directive", "", "High-level cognitive goal or task directive")
 	taskFlag := fs.String("task", "", "Alias for --directive: High-level cognitive goal or task directive")
 	thresholdFlag := fs.Float64("threshold", 0.0, "Salience retention threshold")
@@ -1456,6 +1462,7 @@ func runOrchestrate(global GlobalFlags, args []string) {
 		RecallMinSim:           *minSimFlag,
 		MaxInputBytes:          *maxInputFlag,
 		ContextTokens:          *contextTokensFlag,
+		OutputReserve:          *outputReserveFlag,
 		PromptReserve:          *promptReserveFlag,
 	})
 	if err != nil {
@@ -1500,6 +1507,7 @@ func runOrchestrate(global GlobalFlags, args []string) {
 		IncludeEmbeddings:      includeEmbeddings,
 		RecallMinSim:           cfg.RecallMinSim,
 		ContextTokens:          cfg.ContextTokens,
+		OutputReserveTokens:    cfg.OutputReserve,
 		PromptReserveTokens:    cfg.PromptReserve,
 	}
 

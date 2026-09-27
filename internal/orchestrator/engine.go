@@ -198,9 +198,10 @@ func (o *Orchestrator) RunCycle(ctx context.Context, req model.OrchestrateReques
 
 	workingNodeName := fmt.Sprintf("Working Memory Layer (%s)", o.cfg.WorkingURL)
 	packed, packErr := packContext(objective, sensoryResp.Chunks, facts, budgetSettings{
-		contextTokens: positiveIntOr(req.ContextTokens, DefaultContextTokens),
-		maxTokens:     maxTokens,
-		reserveTokens: positiveIntOr(req.PromptReserveTokens, DefaultPromptReserveTokens),
+		contextTokens:       positiveIntOr(req.ContextTokens, DefaultContextTokens),
+		maxTokens:           maxTokens,
+		outputReserveTokens: positiveIntOr(req.OutputReserveTokens, DefaultOutputReserveTokens),
+		reserveTokens:       positiveIntOr(req.PromptReserveTokens, DefaultPromptReserveTokens),
 	})
 
 	var delibResp *model.DeliberateResponse
@@ -208,18 +209,22 @@ func (o *Orchestrator) RunCycle(ctx context.Context, req model.OrchestrateReques
 		err = packErr
 	} else {
 		delibReq := model.DeliberateRequest{
-			Objective:       objective,
-			SensoryChunks:   packed.chunks,
-			LongTermContext: packed.facts,
-			MaxTokens:       maxTokens,
-			Temperature:     0.2,
+			Objective:          objective,
+			SensoryChunks:      packed.chunks,
+			LongTermContext:    packed.facts,
+			MaxTokens:          maxTokens,
+			Temperature:        0.2,
+			Prepacked:          true,
+			PromptBudgetTokens: packed.report.PromptBudgetTokens,
 		}
-		stage3Ctx, cancel3 := withDeadline(ctx, client.DeliberationTimeout(o.cfg.DeliberateTimeout, packed.report.EstimatedPromptTokens, maxTokens))
+		promptTokens := packed.report.EstimatedPromptTokens + packed.report.TemplateReserveTokens
+		stage3Ctx, cancel3 := withDeadline(ctx, client.DeliberationTimeout(o.cfg.DeliberateTimeout, promptTokens, maxTokens))
 		delibResp, err = o.working.Deliberate(stage3Ctx, delibReq, traceID)
 		cancel3()
-		if err == nil && delibResp.PromptTokens > 0 {
-			packed.report.ActualPromptTokens = delibResp.PromptTokens
-			packed.report.WithinBudget = delibResp.PromptTokens <= packed.report.PromptLimitTokens
+		if err == nil {
+			packed.report.ApplyNode2Usage(delibResp)
+		} else {
+			packed.report.ApplyNode2Usage(nil)
 		}
 	}
 	stage3Duration := float64(time.Since(stage3Start).Microseconds()) / 1000.0
@@ -248,9 +253,13 @@ func (o *Orchestrator) RunCycle(ctx context.Context, req model.OrchestrateReques
 			IsComplete:       false,
 		}
 	} else {
-		telemetry.LogStep(traceID, "ContextBudget", fmt.Sprintf("Packed %d/%d chunks and %d/%d facts, ~%d of %d prompt tokens (actual %d)",
+		telemetry.LogStep(traceID, "ContextBudget", fmt.Sprintf("Packed %d/%d chunks and %d/%d facts, ~%d of %d prompt tokens (actual %d, node 2 usage %s)",
 			packed.report.ChunksPacked, packed.report.ChunksIn, packed.report.FactsPacked, packed.report.FactsIn,
-			packed.report.EstimatedPromptTokens, packed.report.PromptBudgetTokens, packed.report.ActualPromptTokens))
+			packed.report.EstimatedPromptTokens, packed.report.PromptBudgetTokens, packed.report.ActualPromptTokens, packed.report.Node2Usage))
+		if u := packed.report.Node2ContextUsage; packed.report.Node2SecondCut && u != nil {
+			telemetry.LogStep(traceID, "ContextBudget", fmt.Sprintf("Node 2 cut the prepacked context again: kept %d of %d chunks (%d truncated), %d of %d facts",
+				u.SensoryKept, u.SensoryReceived, u.SensoryTruncated, u.FactsKept, u.FactsReceived))
+		}
 		status := "success"
 		if !packed.report.WithinBudget {
 			status = "over_budget"

@@ -6,14 +6,17 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/Duara-Cortex/sekha-cluster-tool/internal/config"
 	"github.com/Duara-Cortex/sekha-cluster-tool/internal/model"
 )
 
 const (
-	// DefaultContextTokens is the Node 2 llama-server context window on the test hardware (n_ctx).
-	DefaultContextTokens = 4096
+	// DefaultContextTokens is the Node 2 llama-server context window (n_ctx).
+	DefaultContextTokens = config.DefaultContextTokens
+	// DefaultOutputReserveTokens is the completion reserve Node 2 holds back from its window.
+	DefaultOutputReserveTokens = config.DefaultOutputReserveTokens
 	// DefaultPromptReserveTokens covers the Node 2 prompt template, role markers and JSON framing.
-	DefaultPromptReserveTokens = 384
+	DefaultPromptReserveTokens = config.DefaultPromptReserveTokens
 	// perItemOverheadTokens accounts for the separators Node 2 adds around each chunk or fact.
 	perItemOverheadTokens = 8
 	// recallShareDivisor caps recalled facts at 1/4 of the prompt budget so input chunks keep priority.
@@ -23,22 +26,42 @@ const (
 	// maxPackingDecisions bounds the per-item detail list in stages[] telemetry.
 	maxPackingDecisions = 64
 
-	estimatorName = "conservative-heuristic-v1"
+	estimatorName = "heuristic-v2"
 )
 
-// EstimateTokens returns a deliberately high token estimate for s without a tokenizer.
-// ASCII letter runs count one token per 3 characters, every digit, punctuation mark and
-// symbol counts as one token, whitespace runs longer than one character count as one token,
-// and each non-ASCII rune counts as one token per 2 UTF-8 bytes (rounded up).
+// EstimateTokens coefficients. They are fitted so the estimate never falls below Node 2's
+// tokenizer count on real BEAM text; see the calibration fixtures in testdata/.
+const (
+	// wordBaseLetters is how many letters of an ASCII word the first token covers.
+	wordBaseLetters = 4
+	// lettersPerExtraToken prices the rest of a word, so rare words that split into pieces
+	// are still covered.
+	lettersPerExtraToken = 3
+)
+
+// EstimateTokens returns a token estimate for s, without a tokenizer, that errs high.
+//   - An ASCII word (a letter run, split at lower-to-upper case changes) costs one token for
+//     its first wordBaseLetters letters and one per lettersPerExtraToken letters after that.
+//   - Every digit, punctuation mark, symbol and newline counts as one token.
+//   - A run of two or more other whitespace characters counts as one token; a single space
+//     joins the next word for free.
+//   - Each non-ASCII rune counts as one token per 2 UTF-8 bytes, rounded up.
+//
+// The estimate never decreases as a prefix of s grows, which truncateToTokens relies on.
 func EstimateTokens(s string) int {
 	tokens := 0
 	letterRun := 0
 	spaceRun := 0
+	prevLower := false
 	flushLetters := func() {
 		if letterRun > 0 {
-			tokens += (letterRun + 2) / 3
+			tokens++
+			if extra := letterRun - wordBaseLetters; extra > 0 {
+				tokens += (extra + lettersPerExtraToken - 1) / lettersPerExtraToken
+			}
 			letterRun = 0
 		}
+		prevLower = false
 	}
 	flushSpaces := func() {
 		if spaceRun > 1 {
@@ -50,7 +73,15 @@ func EstimateTokens(s string) int {
 		switch {
 		case r < utf8.RuneSelf && (unicode.IsLetter(r) || r == '_'):
 			flushSpaces()
+			if prevLower && unicode.IsUpper(r) {
+				flushLetters()
+			}
 			letterRun++
+			prevLower = unicode.IsLower(r)
+		case r == '\n':
+			flushLetters()
+			flushSpaces()
+			tokens++
 		case r < utf8.RuneSelf && unicode.IsSpace(r):
 			flushLetters()
 			spaceRun++
@@ -97,9 +128,16 @@ func truncateToTokens(s string, limit int) string {
 
 // budgetSettings holds the resolved Node 2 context window parameters for one cycle.
 type budgetSettings struct {
-	contextTokens int
-	maxTokens     int
-	reserveTokens int
+	contextTokens       int
+	maxTokens           int
+	outputReserveTokens int
+	reserveTokens       int
+}
+
+// outputTokens is what Node 2 holds back for the completion: its output reserve, or max_tokens
+// when that is larger.
+func (s budgetSettings) outputTokens() int {
+	return max(s.outputReserveTokens, s.maxTokens)
 }
 
 // packedContext is the budget-compliant Stage 3 payload plus its telemetry.
@@ -118,9 +156,10 @@ func packContext(objective string, chunks []model.SensoryChunk, facts []rankedFa
 		Estimator:             estimatorName,
 		ContextWindowTokens:   s.contextTokens,
 		MaxCompletionTokens:   s.maxTokens,
-		PromptLimitTokens:     s.contextTokens - s.maxTokens,
+		PromptLimitTokens:     s.contextTokens - s.outputTokens(),
 		TemplateReserveTokens: s.reserveTokens,
-		PromptBudgetTokens:    s.contextTokens - s.maxTokens - s.reserveTokens,
+		PromptBudgetTokens:    s.contextTokens - s.outputTokens() - s.reserveTokens,
+		OutputReserveTokens:   s.outputReserveTokens,
 		ChunksIn:              len(chunks),
 		FactsIn:               len(facts),
 	}
@@ -136,8 +175,8 @@ func packContext(objective string, chunks []model.SensoryChunk, facts []rankedFa
 
 	if report.PromptBudgetTokens <= objectiveTokens {
 		return &packedContext{report: report}, fmt.Errorf(
-			"node 2 prompt budget exhausted before packing: context window %d - max_tokens %d - template reserve %d leaves %d tokens, objective alone needs ~%d; lower --max-tokens or raise --context-tokens",
-			s.contextTokens, s.maxTokens, s.reserveTokens, report.PromptBudgetTokens, objectiveTokens)
+			"node 2 prompt budget exhausted before packing: context window %d - output reserve %d (max of --output-reserve and --max-tokens) - template reserve %d leaves %d tokens, objective alone needs ~%d; lower --max-tokens or raise --context-tokens",
+			s.contextTokens, s.outputTokens(), s.reserveTokens, report.PromptBudgetTokens, objectiveTokens)
 	}
 
 	remaining := report.PromptBudgetTokens - objectiveTokens

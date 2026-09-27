@@ -19,6 +19,7 @@ type OrchestrateRequest struct {
 	IncludeEmbeddings      bool     `json:"include_embeddings,omitempty"`
 	RecallMinSim           float64  `json:"recall_min_sim,omitempty"`
 	ContextTokens          int      `json:"context_tokens,omitempty"`
+	OutputReserveTokens    int      `json:"output_reserve_tokens,omitempty"`
 	PromptReserveTokens    int      `json:"prompt_reserve_tokens,omitempty"`
 }
 
@@ -73,7 +74,18 @@ type PackingDecision struct {
 	Action         string  `json:"action"`
 }
 
+// Node 2 usage states reported in ContextBudgetReport.Node2Usage.
+const (
+	// Node2UsageReported means Node 2 returned context_usage and the node2_* fields are its counts.
+	Node2UsageReported = "reported"
+	// Node2UsageUnknown means Node 2 did not return context_usage (an older build, or no response);
+	// node2_context_usage is omitted and within_budget falls back to prompt_tokens.
+	Node2UsageUnknown = "unknown"
+)
+
 // ContextBudgetReport describes how Stage 3 context was packed into the Node 2 context window.
+// The fields up to Truncated are the tool's side (what it packed and sent); the node2_* fields
+// are Node 2's side (what it actually put in the prompt).
 type ContextBudgetReport struct {
 	Estimator             string            `json:"estimator"`
 	ContextWindowTokens   int               `json:"context_window_tokens"`
@@ -93,8 +105,49 @@ type ContextBudgetReport struct {
 	FactsPacked           int               `json:"facts_packed"`
 	FactsDropped          int               `json:"facts_dropped"`
 	Truncated             bool              `json:"truncated"`
+	OutputReserveTokens   int               `json:"output_reserve_tokens"`
+	Node2Usage            string            `json:"node2_usage,omitempty"`
+	Node2ContextUsage     *ContextUsage     `json:"node2_context_usage,omitempty"`
+	Node2SecondCut        bool              `json:"node2_second_cut,omitempty"`
 	Decisions             []PackingDecision `json:"decisions,omitempty"`
 	DecisionsOmitted      int               `json:"decisions_omitted,omitempty"`
+}
+
+// ApplyNode2Usage merges Node 2's reply into the report. With context_usage, within_budget is
+// Node 2's actual prompt against Node 2's own prompt window, and node2_second_cut flags any
+// sensory chunk or fact Node 2 dropped or truncated after the tool packed them. Without it,
+// the Node 2 side is marked unknown and within_budget uses prompt_tokens against the tool's
+// prompt limit. The second-cut flag is telemetry only; it does not change within_budget.
+func (b *ContextBudgetReport) ApplyNode2Usage(resp *DeliberateResponse) {
+	if resp == nil {
+		b.Node2Usage = Node2UsageUnknown
+		return
+	}
+	if u := resp.ContextUsage; u != nil {
+		usage := *u
+		b.Node2Usage = Node2UsageReported
+		b.Node2ContextUsage = &usage
+		b.Node2SecondCut = usage.SensoryKept < usage.SensoryReceived || usage.SensoryDropped > 0 ||
+			usage.SensoryTruncated > 0 || usage.FactsKept < usage.FactsReceived
+		actual := usage.ActualPromptTokens
+		if actual <= 0 {
+			actual = resp.PromptTokens
+		}
+		if actual > 0 {
+			b.ActualPromptTokens = actual
+			window := usage.PromptWindowTokens
+			if window <= 0 {
+				window = b.PromptLimitTokens
+			}
+			b.WithinBudget = actual <= window
+		}
+		return
+	}
+	b.Node2Usage = Node2UsageUnknown
+	if resp.PromptTokens > 0 {
+		b.ActualPromptTokens = resp.PromptTokens
+		b.WithinBudget = resp.PromptTokens <= b.PromptLimitTokens
+	}
 }
 
 // OrchestrateResponse encapsulates the end-to-end outcome of the four-stage cognitive cycle.
@@ -174,6 +227,10 @@ type ContextBudgetSummary struct {
 	FactsIn               int  `json:"facts_in"`
 	FactsPacked           int  `json:"facts_packed"`
 	FactsDropped          int  `json:"facts_dropped"`
+	// Node 2's side, as in ContextBudgetReport.
+	Node2Usage        string        `json:"node2_usage,omitempty"`
+	Node2ContextUsage *ContextUsage `json:"node2_context_usage,omitempty"`
+	Node2SecondCut    bool          `json:"node2_second_cut,omitempty"`
 }
 
 // DeliberationSummary gives Node 2 status, token counts and rates.
@@ -276,6 +333,9 @@ func (r *OrchestrateResponse) Concise() OrchestrateSummary {
 				FactsIn:               b.FactsIn,
 				FactsPacked:           b.FactsPacked,
 				FactsDropped:          b.FactsDropped,
+				Node2Usage:            b.Node2Usage,
+				Node2ContextUsage:     b.Node2ContextUsage,
+				Node2SecondCut:        b.Node2SecondCut,
 			}
 		}
 	}

@@ -22,6 +22,17 @@ var (
 // DefaultMaxInputBytes caps the combined inline/file/stdin payload a single invocation accepts (1 MiB).
 const DefaultMaxInputBytes = 1 << 20
 
+// Node 2 context budget defaults. They must match the Node 2 deployment: the context window is
+// llama-server's n_ctx (Node 2 ContextLimit) and the output reserve is Node 2's OutputReserve,
+// so context - output reserve equals the prompt_window_tokens Node 2 reports. The template
+// reserve covers Node 2's prompt template, measured live at ~184 tokens (v1.0.10: 193 prompt
+// tokens for a 9-token task) plus a margin.
+const (
+	DefaultContextTokens       = 4096
+	DefaultOutputReserveTokens = 512
+	DefaultPromptReserveTokens = 256
+)
+
 // DefaultSensoryTimeout is the Node 3 filter deadline when CLUSTER_SENSORY_TIMEOUT_MS is unset.
 const DefaultSensoryTimeout = 30 * time.Second
 
@@ -49,8 +60,9 @@ type Config struct {
 	RecallTopK         int           `json:"recall_top_k"`
 	RecallMinSim       float64       `json:"recall_min_sim,omitempty"`
 	MaxInputBytes      int           `json:"max_input_bytes"`
-	ContextTokens      int           `json:"deliberate_context_tokens,omitempty"`
-	PromptReserve      int           `json:"deliberate_prompt_reserve_tokens,omitempty"`
+	ContextTokens      int           `json:"deliberate_context_tokens"`
+	OutputReserve      int           `json:"deliberate_output_reserve_tokens"`
+	PromptReserve      int           `json:"deliberate_prompt_reserve_tokens"`
 	EnvFileLoaded      string        `json:"env_file_loaded,omitempty"`
 }
 
@@ -77,6 +89,7 @@ type FlagOverrides struct {
 	RecallMinSim           float64
 	MaxInputBytes          int
 	ContextTokens          int
+	OutputReserve          int
 	PromptReserve          int
 }
 
@@ -95,6 +108,9 @@ func Load(flags FlagOverrides) (*Config, error) {
 		SalienceThreshold:  0.45,
 		RecallTopK:         5,
 		MaxInputBytes:      DefaultMaxInputBytes,
+		ContextTokens:      DefaultContextTokens,
+		OutputReserve:      DefaultOutputReserveTokens,
+		PromptReserve:      DefaultPromptReserveTokens,
 	}
 
 	// 1. Check build-time injected variables (from compile flags)
@@ -215,6 +231,11 @@ func Load(flags FlagOverrides) (*Config, error) {
 			cfg.ContextTokens = n
 		}
 	}
+	if val := getEnv("CLUSTER_DELIBERATE_OUTPUT_RESERVE", ""); val != "" {
+		if n, err := strconv.Atoi(val); err == nil && n > 0 {
+			cfg.OutputReserve = n
+		}
+	}
 	if val := getEnv("CLUSTER_DELIBERATE_PROMPT_RESERVE", ""); val != "" {
 		if n, err := strconv.Atoi(val); err == nil && n > 0 {
 			cfg.PromptReserve = n
@@ -289,6 +310,9 @@ func Load(flags FlagOverrides) (*Config, error) {
 	}
 	if flags.ContextTokens > 0 {
 		cfg.ContextTokens = flags.ContextTokens
+	}
+	if flags.OutputReserve > 0 {
+		cfg.OutputReserve = flags.OutputReserve
 	}
 	if flags.PromptReserve > 0 {
 		cfg.PromptReserve = flags.PromptReserve
@@ -459,10 +483,12 @@ CLUSTER_RECALL_TOP_K=5
 # Relevance gate: minimum sim_score for recalled nodes to reach Node 2 (default 0.50)
 # CLUSTER_RECALL_MIN_SIM=0.50
 
-# Payload & Node 2 context budget
+# Payload & Node 2 context budget. Context window and output reserve must match Node 2's
+# llama-server n_ctx and Node 2 OutputReserve; the prompt reserve covers Node 2's template.
 # CLUSTER_MAX_INPUT_BYTES=1048576
 # CLUSTER_DELIBERATE_CONTEXT_TOKENS=4096
-# CLUSTER_DELIBERATE_PROMPT_RESERVE=384
+# CLUSTER_DELIBERATE_OUTPUT_RESERVE=512
+# CLUSTER_DELIBERATE_PROMPT_RESERVE=256
 
 # Transport Encryption & TLS (optional)
 # CLUSTER_TLS_CA_CERT=/path/to/ca.crt

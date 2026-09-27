@@ -43,6 +43,24 @@ type DeliberateRequest struct {
 	Observation     string         `json:"observation,omitempty"`
 	MaxTokens       int            `json:"max_tokens,omitempty"`
 	Temperature     float64        `json:"temperature,omitempty"`
+	// Prepacked tells Node 2 the caller already packed SensoryChunks and LongTermContext into
+	// PromptBudgetTokens, so Node 2 should not cut them again.
+	Prepacked          bool `json:"prepacked,omitempty"`
+	PromptBudgetTokens int  `json:"prompt_budget_tokens,omitempty"`
+}
+
+// ContextUsage is Node 2's account of what it actually put in the prompt. Older Node 2 builds
+// do not send it.
+type ContextUsage struct {
+	SensoryReceived       int `json:"sensory_received"`
+	SensoryKept           int `json:"sensory_kept"`
+	SensoryDropped        int `json:"sensory_dropped"`
+	SensoryTruncated      int `json:"sensory_truncated"`
+	FactsReceived         int `json:"facts_received"`
+	FactsKept             int `json:"facts_kept"`
+	EstimatedPromptTokens int `json:"estimated_prompt_tokens"`
+	ActualPromptTokens    int `json:"actual_prompt_tokens"`
+	PromptWindowTokens    int `json:"prompt_window_tokens"`
 }
 
 // DeliberateResponse is returned upon step completion by Node 2.
@@ -58,6 +76,7 @@ type DeliberateResponse struct {
 	TotalTokens      int               `json:"total_tokens"`
 	EvaluationRate   float64           `json:"prompt_eval_rate_tps,omitempty"`
 	GenerationRate   float64           `json:"generation_rate_tps,omitempty"`
+	ContextUsage     *ContextUsage     `json:"context_usage,omitempty"`
 	ActiveGoal       string            `json:"active_goal"`
 	TrajectoryLength int               `json:"trajectory_length"`
 	Timestamp        time.Time         `json:"timestamp"`
