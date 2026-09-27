@@ -91,6 +91,8 @@ func isolateEnv(t *testing.T) {
 	}
 	t.Setenv("CLUSTER_ENV_FILE", empty)
 	t.Setenv("CLUSTER_MAX_INPUT_BYTES", "")
+	t.Setenv("CLUSTER_SENSORY_TIMEOUT_MS", "")
+	t.Setenv("CLUSTER_CONSOLIDATE_TIMEOUT_MS", "")
 }
 
 // mockCluster records what each node received and answers like a healthy cluster.
@@ -187,7 +189,7 @@ func TestSizeMatrix_Orchestrate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			mc := newMockCluster(t)
 			text := naturalText(tc.bytes)
-			args := append(repeatFlag("input", splitParts(text, tc.parts)), "--task", "Summarise the orchard ledger")
+			args := append(repeatFlag("input", splitParts(text, tc.parts)), "--task", "Summarise the orchard ledger", "--full")
 			out, code := captureOutputWithExit(func() { runOrchestrate(mc.global(), args) })
 			if code != 0 {
 				t.Fatalf("orchestrate exited %d: %s", code, out)

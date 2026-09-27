@@ -19,8 +19,9 @@ type Orchestrator struct {
 }
 
 // NewOrchestrator initialises the orchestration engine with cluster layer clients.
-// The clients carry no fixed HTTP timeout: RunCycle sets a per-stage deadline sized to the
-// payload each stage actually sends.
+// The clients carry no fixed HTTP timeout: RunCycle sets each stage's deadline from config
+// (sensory and consolidate timeouts, the default timeout for recall, and a token-sized deadline
+// for deliberation).
 func NewOrchestrator(cfg client.Config) *Orchestrator {
 	return &Orchestrator{
 		cfg:       cfg,
@@ -66,9 +67,9 @@ func (o *Orchestrator) RunCycle(ctx context.Context, req model.OrchestrateReques
 		Threshold:     threshold,
 	}
 
-	payloadTimeout := client.PayloadTimeout(o.cfg.DefaultTimeout, len(req.RawInput))
-	stage1Ctx, cancel1 := withDeadline(ctx, payloadTimeout)
+	stage1Ctx, cancel1 := withDeadline(ctx, o.cfg.SensoryTimeout)
 	sensoryResp, err := o.sensory.Filter(stage1Ctx, filterReq, traceID)
+	err = client.WithDeadline(stage1Ctx, err, "sensory filter", o.cfg.SensoryTimeout, o.cfg.SensorySource, "CLUSTER_SENSORY_TIMEOUT_MS")
 	cancel1()
 	stage1Duration := float64(time.Since(stage1Start).Microseconds()) / 1000.0
 
@@ -312,8 +313,9 @@ func (o *Orchestrator) RunCycle(ctx context.Context, req model.OrchestrateReques
 		Synchronous:      req.SynchronousConsolidate,
 	}
 
-	stage4Ctx, cancel4 := withDeadline(ctx, payloadTimeout)
+	stage4Ctx, cancel4 := withDeadline(ctx, o.cfg.ConsolidateTimeout)
 	consolidateResp, err := o.knowledge.Consolidate(stage4Ctx, consolidateReq, traceID)
+	err = client.WithDeadline(stage4Ctx, err, "consolidate", o.cfg.ConsolidateTimeout, o.cfg.ConsolidateSource, "CLUSTER_CONSOLIDATE_TIMEOUT_MS")
 	cancel4()
 	stage4Duration := float64(time.Since(stage4Start).Microseconds()) / 1000.0
 
@@ -328,9 +330,10 @@ func (o *Orchestrator) RunCycle(ctx context.Context, req model.OrchestrateReques
 		})
 		telemetry.LogStep(traceID, "Consolidation", fmt.Sprintf("Consolidation stage error: %v", err))
 		consolidateResp = &model.ConsolidateResponse{
-			Status:  "failed",
-			TraceID: traceID,
-			Message: err.Error(),
+			Status:      "failed",
+			TraceID:     traceID,
+			Message:     err.Error(),
+			Synchronous: req.SynchronousConsolidate,
 		}
 	} else {
 		resp.Stages = append(resp.Stages, model.StageTelemetry{
@@ -345,11 +348,35 @@ func (o *Orchestrator) RunCycle(ctx context.Context, req model.OrchestrateReques
 
 	// Calculate total execution metrics
 	resp.TotalDurationMS = float64(time.Since(startTime).Microseconds()) / 1000.0
-	resp.Status = "completed"
+	resp.Status, resp.LoopComplete = cycleOutcome(resp.Stages)
 
-	telemetry.LogStep(traceID, "Orchestrator", fmt.Sprintf("Cognitive cycle completed in %.2fms", resp.TotalDurationMS))
+	telemetry.LogStep(traceID, "Orchestrator", fmt.Sprintf("Cognitive cycle %s in %.2fms", resp.Status, resp.TotalDurationMS))
 
 	return resp, nil
+}
+
+// cycleOutcome derives the top-level status from the stage results: "completed" when no stage
+// failed, "partial" when some failed, "failed" when all did. loopComplete is true only when all
+// four stages report "success" (an over_budget deliberation ran, but does not count).
+func cycleOutcome(stages []model.StageTelemetry) (status string, loopComplete bool) {
+	failed, succeeded := 0, 0
+	for _, st := range stages {
+		switch st.Status {
+		case "failed":
+			failed++
+		case "success":
+			succeeded++
+		}
+	}
+	switch {
+	case failed == 0:
+		status = "completed"
+	case failed == len(stages):
+		status = "failed"
+	default:
+		status = "partial"
+	}
+	return status, len(stages) == 4 && succeeded == 4
 }
 
 // withDeadline applies d to ctx; a non-positive d means no deadline, as with the HTTP client.

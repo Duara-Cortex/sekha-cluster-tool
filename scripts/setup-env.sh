@@ -45,6 +45,14 @@ printf "Deliberation Timeout in milliseconds [8000]: "
 read -r DELIB_MS
 DELIB_MS="${DELIB_MS:-8000}"
 
+printf "Sensory Filter Timeout in milliseconds [30000]: "
+read -r SENSORY_MS
+SENSORY_MS="${SENSORY_MS:-30000}"
+
+printf "Consolidate Timeout in milliseconds [120000]: "
+read -r CONSOLIDATE_MS
+CONSOLIDATE_MS="${CONSOLIDATE_MS:-120000}"
+
 printf "Salience Attention Threshold [0.45]: "
 read -r THRESHOLD
 THRESHOLD="${THRESHOLD:-0.45}"
@@ -74,6 +82,8 @@ CLUSTER_API_KEY=${API_KEY}
 # Timeout Budgets (milliseconds)
 CLUSTER_DEFAULT_TIMEOUT_MS=${TIMEOUT_MS}
 CLUSTER_DELIBERATE_TIMEOUT_MS=${DELIB_MS}
+CLUSTER_SENSORY_TIMEOUT_MS=${SENSORY_MS}
+CLUSTER_CONSOLIDATE_TIMEOUT_MS=${CONSOLIDATE_MS}
 
 # Attention & Recall Parameters
 CLUSTER_SALIENCE_THRESHOLD=${THRESHOLD}

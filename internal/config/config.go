@@ -22,57 +22,79 @@ var (
 // DefaultMaxInputBytes caps the combined inline/file/stdin payload a single invocation accepts (1 MiB).
 const DefaultMaxInputBytes = 1 << 20
 
+// DefaultSensoryTimeout is the Node 3 filter deadline when CLUSTER_SENSORY_TIMEOUT_MS is unset.
+const DefaultSensoryTimeout = 30 * time.Second
+
+// DefaultConsolidateTimeout is the Node 1 consolidate deadline when CLUSTER_CONSOLIDATE_TIMEOUT_MS
+// is unset. Synchronous consolidation of a large payload runs entity extraction on Node 1, so the
+// default is generous; tune it per cluster in .env.
+const DefaultConsolidateTimeout = 120 * time.Second
+
 // Config represents the fully resolved runtime configuration for the cluster tool.
 type Config struct {
-	SensoryURL        string        `json:"sensory_url"`
-	WorkingURL        string        `json:"working_url"`
-	KnowledgeURL      string        `json:"knowledge_url"`
-	APIKey            string        `json:"api_key,omitempty"`
-	TLSCACert         string        `json:"tls_ca_cert,omitempty"`
-	TLSCACertSource   string        `json:"tls_ca_cert_source,omitempty"`
-	Insecure          bool          `json:"insecure,omitempty"`
-	DefaultTimeout    time.Duration `json:"default_timeout"`
-	DeliberateTimeout time.Duration `json:"deliberate_timeout"`
-	SalienceThreshold float64       `json:"salience_threshold"`
-	RecallTopK        int           `json:"recall_top_k"`
-	RecallMinSim      float64       `json:"recall_min_sim,omitempty"`
-	MaxInputBytes     int           `json:"max_input_bytes"`
-	ContextTokens     int           `json:"deliberate_context_tokens,omitempty"`
-	PromptReserve     int           `json:"deliberate_prompt_reserve_tokens,omitempty"`
-	EnvFileLoaded     string        `json:"env_file_loaded,omitempty"`
+	SensoryURL         string        `json:"sensory_url"`
+	WorkingURL         string        `json:"working_url"`
+	KnowledgeURL       string        `json:"knowledge_url"`
+	APIKey             string        `json:"api_key,omitempty"`
+	TLSCACert          string        `json:"tls_ca_cert,omitempty"`
+	TLSCACertSource    string        `json:"tls_ca_cert_source,omitempty"`
+	Insecure           bool          `json:"insecure,omitempty"`
+	DefaultTimeout     time.Duration `json:"default_timeout"`
+	DeliberateTimeout  time.Duration `json:"deliberate_timeout"`
+	SensoryTimeout     time.Duration `json:"sensory_timeout"`
+	SensorySource      string        `json:"sensory_timeout_source"`
+	ConsolidateTimeout time.Duration `json:"consolidate_timeout"`
+	ConsolidateSource  string        `json:"consolidate_timeout_source"`
+	SalienceThreshold  float64       `json:"salience_threshold"`
+	RecallTopK         int           `json:"recall_top_k"`
+	RecallMinSim       float64       `json:"recall_min_sim,omitempty"`
+	MaxInputBytes      int           `json:"max_input_bytes"`
+	ContextTokens      int           `json:"deliberate_context_tokens,omitempty"`
+	PromptReserve      int           `json:"deliberate_prompt_reserve_tokens,omitempty"`
+	EnvFileLoaded      string        `json:"env_file_loaded,omitempty"`
 }
 
 // FlagOverrides captures CLI arguments for precedence overriding.
 type FlagOverrides struct {
-	EnvPath           string
-	SensoryURL        string
-	WorkingURL        string
-	KnowledgeURL      string
-	OrchestrationURL  string
-	APIKey            string
-	TLSCACert         string
-	Insecure          bool
-	Timeout           time.Duration
-	DeliberateTimeout time.Duration
-	SalienceThreshold float64
-	RecallTopK        int
-	RecallMinSim      float64
-	MaxInputBytes     int
-	ContextTokens     int
-	PromptReserve     int
+	EnvPath            string
+	SensoryURL         string
+	WorkingURL         string
+	KnowledgeURL       string
+	OrchestrationURL   string
+	APIKey             string
+	TLSCACert          string
+	Insecure           bool
+	Timeout            time.Duration
+	DeliberateTimeout  time.Duration
+	SensoryTimeout     time.Duration
+	ConsolidateTimeout time.Duration
+	// SensoryTimeoutFlag / ConsolidateTimeoutFlag name the flag that set the value (e.g.
+	// "--consolidate-timeout"), reported as its source in deadline errors.
+	SensoryTimeoutFlag     string
+	ConsolidateTimeoutFlag string
+	SalienceThreshold      float64
+	RecallTopK             int
+	RecallMinSim           float64
+	MaxInputBytes          int
+	ContextTokens          int
+	PromptReserve          int
 }
 
 // Load resolves configuration across flags, real OS environment variables, .env files, and build variables.
 func Load(flags FlagOverrides) (*Config, error) {
 	cfg := &Config{
-		SensoryURL:        "",
-		WorkingURL:        "",
-		KnowledgeURL:      "",
-		DefaultTimeout:    1500 * time.Millisecond,
-		DeliberateTimeout: 8000 * time.Millisecond,
-		SalienceThreshold: 0.45,
-		RecallTopK:        5,
-		MaxInputBytes:     DefaultMaxInputBytes,
+		SensoryURL:         "",
+		WorkingURL:         "",
+		KnowledgeURL:       "",
+		DefaultTimeout:     1500 * time.Millisecond,
+		DeliberateTimeout:  8000 * time.Millisecond,
+		SensoryTimeout:     DefaultSensoryTimeout,
+		SensorySource:      "default",
+		ConsolidateTimeout: DefaultConsolidateTimeout,
+		ConsolidateSource:  "default",
+		SalienceThreshold:  0.45,
+		RecallTopK:         5,
+		MaxInputBytes:      DefaultMaxInputBytes,
 	}
 
 	// 1. Check build-time injected variables (from compile flags)
@@ -143,6 +165,28 @@ func Load(flags FlagOverrides) (*Config, error) {
 	if val := getEnv("CLUSTER_DELIBERATE_TIMEOUT_MS", ""); val != "" {
 		if ms, err := strconv.Atoi(val); err == nil && ms > 0 {
 			cfg.DeliberateTimeout = time.Duration(ms) * time.Millisecond
+		}
+	}
+	// sourceOf reports where an env key's value came from, so deadline errors can name it.
+	sourceOf := func(key string) string {
+		if val, exists := os.LookupEnv(key); exists && strings.TrimSpace(val) != "" {
+			return "environment variable " + key
+		}
+		if cfg.EnvFileLoaded != "" {
+			return fmt.Sprintf("%s in .env file (%s)", key, cfg.EnvFileLoaded)
+		}
+		return key + " in .env file"
+	}
+	if val := getEnv("CLUSTER_SENSORY_TIMEOUT_MS", ""); val != "" {
+		if ms, err := strconv.Atoi(val); err == nil && ms > 0 {
+			cfg.SensoryTimeout = time.Duration(ms) * time.Millisecond
+			cfg.SensorySource = sourceOf("CLUSTER_SENSORY_TIMEOUT_MS")
+		}
+	}
+	if val := getEnv("CLUSTER_CONSOLIDATE_TIMEOUT_MS", ""); val != "" {
+		if ms, err := strconv.Atoi(val); err == nil && ms > 0 {
+			cfg.ConsolidateTimeout = time.Duration(ms) * time.Millisecond
+			cfg.ConsolidateSource = sourceOf("CLUSTER_CONSOLIDATE_TIMEOUT_MS")
 		}
 	}
 	if val := getEnv("CLUSTER_SALIENCE_THRESHOLD", ""); val != "" {
@@ -223,6 +267,14 @@ func Load(flags FlagOverrides) (*Config, error) {
 	if flags.DeliberateTimeout > 0 {
 		cfg.DeliberateTimeout = flags.DeliberateTimeout
 	}
+	if flags.SensoryTimeout > 0 {
+		cfg.SensoryTimeout = flags.SensoryTimeout
+		cfg.SensorySource = flagSource(flags.SensoryTimeoutFlag)
+	}
+	if flags.ConsolidateTimeout > 0 {
+		cfg.ConsolidateTimeout = flags.ConsolidateTimeout
+		cfg.ConsolidateSource = flagSource(flags.ConsolidateTimeoutFlag)
+	}
 	if flags.SalienceThreshold > 0 {
 		cfg.SalienceThreshold = flags.SalienceThreshold
 	}
@@ -243,6 +295,13 @@ func Load(flags FlagOverrides) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func flagSource(name string) string {
+	if name == "" {
+		return "command-line flag"
+	}
+	return name + " flag"
 }
 
 // resolveEnvPath finds the appropriate .env file to load.
@@ -389,6 +448,10 @@ CLUSTER_API_KEY=
 # Timeout Budgets (milliseconds)
 CLUSTER_DEFAULT_TIMEOUT_MS=1500
 CLUSTER_DELIBERATE_TIMEOUT_MS=8000
+# Node 3 filter deadline (filter, orchestrate stage 1; default 30000)
+CLUSTER_SENSORY_TIMEOUT_MS=30000
+# Node 1 consolidate deadline (consolidate, orchestrate stage 4; default 120000)
+CLUSTER_CONSOLIDATE_TIMEOUT_MS=120000
 
 # Attention & Recall Parameters
 CLUSTER_SALIENCE_THRESHOLD=0.45
