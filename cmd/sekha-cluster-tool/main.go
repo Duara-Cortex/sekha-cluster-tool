@@ -20,7 +20,7 @@ import (
 
 var (
 	// Version is injected at link time via -ldflags or defaults to the release version.
-	Version = "v1.0.9"
+	Version = "v1.0.10"
 )
 
 // GlobalFlags captures CLI arguments specified globally across any subcommand position.
@@ -58,6 +58,38 @@ func (f *anchorSliceFlag) Set(val string) error {
 	*f = append(*f, val)
 	return nil
 }
+
+// concatFlag accumulates repeated occurrences of a payload flag (e.g. --input "part1" --input "part2")
+// and joins them in order with no separator, so callers can split a payload at arbitrary byte
+// offsets to stay under per-argument OS limits.
+type concatFlag struct {
+	parts []string
+}
+
+func (f *concatFlag) String() string {
+	if f == nil {
+		return ""
+	}
+	return strings.Join(f.parts, "")
+}
+
+func (f *concatFlag) Set(val string) error {
+	f.parts = append(f.parts, val)
+	return nil
+}
+
+// Len returns the combined byte length of every occurrence.
+func (f *concatFlag) Len() int {
+	n := 0
+	for _, p := range f.parts {
+		n += len(p)
+	}
+	return n
+}
+
+// payloadFlags take a free-text value that must reach the subcommand verbatim, even when the
+// value itself looks like a global flag (e.g. --input "--verbose output from syslog").
+var payloadFlags = []string{"input", "text", "trace", "file", "directive", "task", "goal", "query", "context", "observation"}
 
 func matchStringFlag(arg string, names ...string) (bool, string, bool) {
 	for _, name := range names {
@@ -134,6 +166,16 @@ func parseArgs(rawArgs []string) (GlobalFlags, string, []string) {
 		if (arg == "-v" || arg == "--version" || arg == "-version") && subcommand == "" {
 			subcommand = "version"
 			i++
+			continue
+		}
+
+		if m, _, inline := matchStringFlag(arg, payloadFlags...); m && subcommand != "" {
+			subcommandArgs = append(subcommandArgs, arg)
+			i++
+			if !inline && i < len(rawArgs) {
+				subcommandArgs = append(subcommandArgs, rawArgs[i])
+				i++
+			}
 			continue
 		}
 
@@ -466,6 +508,17 @@ Global Flags:
   --trace-id <id>            Specify or propagate an explicit X-Trace-ID
   --timeout <duration>       Operation or probe timeout budget (e.g. 500ms, 2s)
 
+Large Payloads (filter/orchestrate/consolidate --input/--text, consolidate --trace):
+  Payload flags are repeatable; occurrences are concatenated in order with no separator,
+  e.g. --input "$PART1" --input "$PART2". Use this to stay under per-argument OS limits
+  (Linux MAX_ARG_STRLEN = 128 KiB). Combined input is capped by --max-input-bytes
+  (default 1 MiB, env CLUSTER_MAX_INPUT_BYTES); oversized input fails and is never truncated.
+
+Orchestrate Relevance & Budget:
+  --min-sim <score>          Minimum recall sim_score passed to Node 2 (default 0.50, env CLUSTER_RECALL_MIN_SIM)
+  --context-tokens <n>       Node 2 context window (default 4096, env CLUSTER_DELIBERATE_CONTEXT_TOKENS)
+  --prompt-reserve <n>       Tokens reserved for Node 2 prompt template (default 384, env CLUSTER_DELIBERATE_PROMPT_RESERVE)
+
 Environment Variables (.env / OS):
   CLUSTER_ENV_FILE       Path to custom .env configuration file
   CLUSTER_SENSORY_URL    Sensory Buffer base URL (fallback: SEKHA_NODE3_URL)
@@ -474,6 +527,10 @@ Environment Variables (.env / OS):
   CLUSTER_API_KEY        Node 1 API Key (fallback: SEKHA_API_KEY)
   CLUSTER_TLS_CA_CERT    Custom root CA certificate path for HTTPS
   CLUSTER_INSECURE       Skip TLS certificate verification (true/false)
+  CLUSTER_MAX_INPUT_BYTES            Combined payload cap in bytes (default 1048576)
+  CLUSTER_RECALL_MIN_SIM             Relevance gate sim_score floor (default 0.50)
+  CLUSTER_DELIBERATE_CONTEXT_TOKENS  Node 2 context window in tokens (default 4096)
+  CLUSTER_DELIBERATE_PROMPT_RESERVE  Node 2 prompt template reserve in tokens (default 384)
 `, Version)
 }
 
@@ -555,7 +612,6 @@ func parseFlagSetWithPositionals(fs *flag.FlagSet, args []string) ([]string, err
 	return positional, nil
 }
 
-
 func validateFormat(raw string) (string, error) {
 	if raw == "" {
 		return "json", nil
@@ -583,17 +639,54 @@ func renderRecallOutput(w io.Writer, resp *model.RecallResponse, format string) 
 	}
 }
 
-func readInput(textFlag, fileFlag string) (string, error) {
-	if textFlag != "" {
-		return textFlag, nil
+// errInputTooLarge builds the actionable error returned when a payload exceeds the input cap.
+// Input is never truncated: the invocation fails before anything is sent to the cluster.
+func errInputTooLarge(flagName string, size, limit int) error {
+	if strings.Contains(flagName, " ") {
+		return fmt.Errorf("%s payload is %d bytes, exceeding the %d-byte input limit; nothing was sent and input is never truncated. "+
+			"Raise the limit with --max-input-bytes or CLUSTER_MAX_INPUT_BYTES, or pass large text via repeated --input flags",
+			flagName, size, limit)
+	}
+	return fmt.Errorf("--%s payload is %d bytes, exceeding the %d-byte input limit; nothing was sent and input is never truncated. "+
+		"Raise the limit with --max-input-bytes or CLUSTER_MAX_INPUT_BYTES, or split the work across invocations. "+
+		"To pass more than the OS allows in one argument (Linux: 128 KiB per argument), repeat the flag: --%s \"part1\" --%s \"part2\" (parts are joined in order)",
+		flagName, size, limit, flagName, flagName)
+}
+
+// readLimited reads r up to limit bytes, failing rather than truncating if more is available.
+func readLimited(r io.Reader, source string, limit int) (string, error) {
+	data, err := io.ReadAll(io.LimitReader(r, int64(limit)+1))
+	if err != nil {
+		return "", err
+	}
+	if len(data) > limit {
+		return "", fmt.Errorf("%s exceeds the %d-byte input limit; nothing was sent and input is never truncated. Raise the limit with --max-input-bytes or CLUSTER_MAX_INPUT_BYTES", source, limit)
+	}
+	return string(data), nil
+}
+
+// readInput resolves the payload from repeated inline flags or --file ('-' for stdin), enforcing
+// maxBytes across whichever source is used.
+func readInput(inline *concatFlag, inlineName, fileFlag string, maxBytes int) (string, error) {
+	if inline.Len() > 0 && fileFlag != "" {
+		return "", fmt.Errorf("--%s and --file are mutually exclusive; pass one input source", inlineName)
+	}
+	if inline.Len() > 0 {
+		if inline.Len() > maxBytes {
+			return "", errInputTooLarge(inlineName, inline.Len(), maxBytes)
+		}
+		return inline.String(), nil
 	}
 	if fileFlag == "-" {
-		bytes, err := io.ReadAll(os.Stdin)
-		return string(bytes), err
+		return readLimited(os.Stdin, "stdin input", maxBytes)
 	}
 	if fileFlag != "" {
-		bytes, err := os.ReadFile(fileFlag)
-		return string(bytes), err
+		f, err := os.Open(fileFlag)
+		if err != nil {
+			return "", err
+		}
+		defer f.Close()
+		return readLimited(f, fmt.Sprintf("input file '%s'", fileFlag), maxBytes)
 	}
 	return "", nil
 }
@@ -665,8 +758,11 @@ func runEnv(global GlobalFlags, args []string) {
 // runFilter handles the 'filter' subcommand.
 func runFilter(global GlobalFlags, args []string) {
 	fs := flag.NewFlagSet("filter", flag.ExitOnError)
-	textFlag := fs.String("text", "", "Raw text input to filter")
-	fileFlag := fs.String("file", "", "Path to text file (or '-' for stdin)")
+	var textFlag concatFlag
+	fs.Var(&textFlag, "text", "Raw text input to filter (repeatable; occurrences are concatenated in order)")
+	fs.Var(&textFlag, "input", "Alias for --text (repeatable)")
+	fileFlag := fs.String("file", "", "Path to text file (or '-' for stdin); convenience for human operators")
+	maxInputFlag := fs.Int("max-input-bytes", 0, "Maximum combined input size in bytes (default 1048576)")
 	directiveFlag := fs.String("directive", "", "Task directive to guide salience scoring")
 	thresholdFlag := fs.Float64("threshold", 0.0, "Salience retention threshold (0.0 to 1.0)")
 	fromBufferFlag := fs.Bool("from-buffer", false, "Filter directly from in-memory ring buffer")
@@ -703,6 +799,7 @@ func runFilter(global GlobalFlags, args []string) {
 		Insecure:          *insecureFlag || global.Insecure,
 		Timeout:           timeout,
 		SalienceThreshold: *thresholdFlag,
+		MaxInputBytes:     *maxInputFlag,
 	})
 	if err != nil {
 		outputError(traceID, err.Error())
@@ -712,7 +809,7 @@ func runFilter(global GlobalFlags, args []string) {
 		outputError(traceID, err.Error())
 	}
 
-	text, err := readInput(*textFlag, *fileFlag)
+	text, err := readInput(&textFlag, "text", *fileFlag, cfg.MaxInputBytes)
 	if err != nil {
 		outputError(traceID, fmt.Sprintf("Error reading input: %v", err))
 	}
@@ -721,8 +818,9 @@ func runFilter(global GlobalFlags, args []string) {
 		outputError(traceID, "Must provide either --text, --file, or --from-buffer")
 	}
 
-	sensoryClient := client.NewSensoryClient(cfg.SensoryURL, cfg.DefaultTimeout, cfg.TLSCACert, cfg.Insecure)
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.DefaultTimeout)
+	requestTimeout := client.PayloadTimeout(cfg.DefaultTimeout, len(text))
+	sensoryClient := client.NewSensoryClient(cfg.SensoryURL, requestTimeout, cfg.TLSCACert, cfg.Insecure)
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 	defer cancel()
 
 	req := model.FilterRequest{
@@ -989,7 +1087,12 @@ func runConsolidate(global GlobalFlags, args []string) {
 		origUsage()
 	}
 
-	traceJSONFlag := fs.String("trace", "", "JSON string or path to episodic trace file")
+	var traceJSONFlag concatFlag
+	fs.Var(&traceJSONFlag, "trace", "Inline trace JSON or path to trace file (repeatable; occurrences are concatenated in order)")
+	var inputFlag concatFlag
+	fs.Var(&inputFlag, "input", "Raw sensory text to consolidate as sensory_context (repeatable; occurrences are concatenated in order)")
+	fs.Var(&inputFlag, "text", "Alias for --input (repeatable)")
+	maxInputFlag := fs.Int("max-input-bytes", 0, "Maximum combined input size in bytes (default 1048576)")
 	sessionIDFlag := fs.String("session-id", "", "Session identifier")
 	goalFlag := fs.String("goal", "", "Task goal description")
 	outcomeFlag := fs.String("outcome", "success", "Outcome: success or failure")
@@ -1028,12 +1131,13 @@ func runConsolidate(global GlobalFlags, args []string) {
 	}
 
 	cfg, err := config.Load(config.FlagOverrides{
-		EnvPath:      pickURL(*envFileFlag, global.EnvPath),
-		KnowledgeURL: pickURL(*knowledgeURLFlag, *node1URLFlag, global.KnowledgeURL),
-		APIKey:       pickURL(*apiKeyFlag, *tokenFlag, *keyFlag, global.APIKey),
-		TLSCACert:    pickURL(*tlsCACertFlag, global.TLSCACert),
-		Insecure:     *insecureFlag || global.Insecure,
-		Timeout:      timeout,
+		EnvPath:       pickURL(*envFileFlag, global.EnvPath),
+		KnowledgeURL:  pickURL(*knowledgeURLFlag, *node1URLFlag, global.KnowledgeURL),
+		APIKey:        pickURL(*apiKeyFlag, *tokenFlag, *keyFlag, global.APIKey),
+		TLSCACert:     pickURL(*tlsCACertFlag, global.TLSCACert),
+		Insecure:      *insecureFlag || global.Insecure,
+		Timeout:       timeout,
+		MaxInputBytes: *maxInputFlag,
 	})
 	if err != nil {
 		outputError(traceID, err.Error())
@@ -1043,17 +1147,37 @@ func runConsolidate(global GlobalFlags, args []string) {
 		outputError(traceID, err.Error())
 	}
 
+	traceArg := traceJSONFlag.String()
+	positionalBytes := 0
+	for _, p := range positionalArgs {
+		positionalBytes += len(p)
+	}
+	if total := traceJSONFlag.Len() + inputFlag.Len() + positionalBytes; total > cfg.MaxInputBytes {
+		source := "input"
+		if traceJSONFlag.Len() >= inputFlag.Len() && traceJSONFlag.Len() >= positionalBytes {
+			source = "trace"
+		} else if positionalBytes > inputFlag.Len() {
+			source = "positional arguments"
+		}
+		outputError(traceID, errInputTooLarge(source, total, cfg.MaxInputBytes).Error())
+	}
+
 	var traceContent []byte
 	var req model.ConsolidateRequest
-	if *traceJSONFlag != "" {
-		var err error
-		if strings.HasPrefix(strings.TrimSpace(*traceJSONFlag), "{") {
-			traceContent = []byte(*traceJSONFlag)
+	if traceArg != "" {
+		if strings.HasPrefix(strings.TrimSpace(traceArg), "{") {
+			traceContent = []byte(traceArg)
 		} else {
-			traceContent, err = os.ReadFile(*traceJSONFlag)
+			f, err := os.Open(traceArg)
 			if err != nil {
 				outputError(traceID, fmt.Sprintf("Error reading trace file: %v", err))
 			}
+			content, err := readLimited(f, fmt.Sprintf("trace file '%s'", traceArg), cfg.MaxInputBytes)
+			f.Close()
+			if err != nil {
+				outputError(traceID, fmt.Sprintf("Error reading trace file: %v", err))
+			}
+			traceContent = []byte(content)
 		}
 		if err := json.Unmarshal(traceContent, &req); err != nil {
 			outputError(traceID, fmt.Sprintf("Error unmarshalling trace JSON: %v", err))
@@ -1112,15 +1236,30 @@ func runConsolidate(global GlobalFlags, args []string) {
 		req.TraceID = traceID
 	}
 
+	inputText := inputFlag.String()
+	if inputText != "" {
+		req.SensoryContext = append(req.SensoryContext, model.SensoryItem{
+			ID:        fmt.Sprintf("cli-input-%d", time.Now().UnixNano()),
+			Text:      inputText,
+			Salience:  1.0,
+			Source:    "cli_input",
+			Timestamp: time.Now().UTC(),
+		})
+	}
+
 	allowSecret := *allowSecretFlag || global.AllowSecret
 	isSecret := *secretFlag || global.Secret
 
 	// Credential persistence safeguards: detect raw secrets in arguments, trace content, or request fields
 	var textsToScan []string
 	textsToScan = append(textsToScan, positionalArgs...)
-	if *traceJSONFlag != "" {
-		textsToScan = append(textsToScan, *traceJSONFlag)
-		if len(traceContent) > 0 {
+	if inputText != "" {
+		textsToScan = append(textsToScan, inputText)
+	}
+	if traceArg != "" {
+		textsToScan = append(textsToScan, traceArg)
+		// Inline traces are the argument itself; only file contents need a second scan.
+		if len(traceContent) > 0 && string(traceContent) != traceArg {
 			textsToScan = append(textsToScan, string(traceContent))
 		}
 	}
@@ -1139,8 +1278,9 @@ func runConsolidate(global GlobalFlags, args []string) {
 		req.IsSecret = true
 	}
 
-	knowledgeClient := client.NewKnowledgeClient(cfg.KnowledgeURL, cfg.DefaultTimeout, cfg.APIKey, cfg.TLSCACert, cfg.Insecure)
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.DefaultTimeout)
+	requestTimeout := client.PayloadTimeout(cfg.DefaultTimeout, len(traceContent)+len(inputText)+positionalBytes)
+	knowledgeClient := client.NewKnowledgeClient(cfg.KnowledgeURL, requestTimeout, cfg.APIKey, cfg.TLSCACert, cfg.Insecure)
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 	defer cancel()
 
 	resp, err := knowledgeClient.Consolidate(ctx, req, traceID)
@@ -1155,8 +1295,14 @@ func runConsolidate(global GlobalFlags, args []string) {
 func runOrchestrate(global GlobalFlags, args []string) {
 	fs := flag.NewFlagSet("orchestrate", flag.ExitOnError)
 	setDoubleDashUsage(fs)
-	inputFlag := fs.String("input", "", "Raw sensory stream or log text")
-	fileFlag := fs.String("file", "", "Path to raw input file (or '-' for stdin)")
+	var inputFlag concatFlag
+	fs.Var(&inputFlag, "input", "Raw sensory stream or log text (repeatable; occurrences are concatenated in order)")
+	fs.Var(&inputFlag, "text", "Alias for --input (repeatable)")
+	fileFlag := fs.String("file", "", "Path to raw input file (or '-' for stdin); convenience for human operators")
+	maxInputFlag := fs.Int("max-input-bytes", 0, "Maximum combined input size in bytes (default 1048576)")
+	minSimFlag := fs.Float64("min-sim", 0, "Relevance gate: minimum recall sim_score to reach Node 2 (default 0.50)")
+	contextTokensFlag := fs.Int("context-tokens", 0, "Node 2 context window in tokens (default 4096)")
+	promptReserveFlag := fs.Int("prompt-reserve", 0, "Tokens reserved for the Node 2 prompt template (default 384)")
 	directiveFlag := fs.String("directive", "", "High-level cognitive goal or task directive")
 	taskFlag := fs.String("task", "", "Alias for --directive: High-level cognitive goal or task directive")
 	thresholdFlag := fs.Float64("threshold", 0.0, "Salience retention threshold")
@@ -1222,6 +1368,10 @@ func runOrchestrate(global GlobalFlags, args []string) {
 		Timeout:           timeout,
 		SalienceThreshold: *thresholdFlag,
 		RecallTopK:        *topKFlag,
+		RecallMinSim:      *minSimFlag,
+		MaxInputBytes:     *maxInputFlag,
+		ContextTokens:     *contextTokensFlag,
+		PromptReserve:     *promptReserveFlag,
 	})
 	if err != nil {
 		outputError(traceID, err.Error())
@@ -1231,7 +1381,7 @@ func runOrchestrate(global GlobalFlags, args []string) {
 		outputError(traceID, err.Error())
 	}
 
-	rawText, err := readInput(*inputFlag, *fileFlag)
+	rawText, err := readInput(&inputFlag, "input", *fileFlag, cfg.MaxInputBytes)
 	if err != nil {
 		outputError(traceID, fmt.Sprintf("Error reading input: %v", err))
 	}
@@ -1259,6 +1409,9 @@ func runOrchestrate(global GlobalFlags, args []string) {
 		Anchors:                anchors,
 		AnchorMode:             anchorMode,
 		IncludeEmbeddings:      includeEmbeddings,
+		RecallMinSim:           cfg.RecallMinSim,
+		ContextTokens:          cfg.ContextTokens,
+		PromptReserveTokens:    cfg.PromptReserve,
 	}
 
 	resp, err := orch.RunCycle(ctx, req, traceID)

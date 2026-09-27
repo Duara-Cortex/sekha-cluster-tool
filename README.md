@@ -74,6 +74,12 @@ CLUSTER_DELIBERATE_TIMEOUT_MS=8000
 # Attention & Recall Parameters
 CLUSTER_SALIENCE_THRESHOLD=0.45
 CLUSTER_RECALL_TOP_K=5
+CLUSTER_RECALL_MIN_SIM=0.50
+
+# Payload cap & Node 2 context budget
+CLUSTER_MAX_INPUT_BYTES=1048576
+CLUSTER_DELIBERATE_CONTEXT_TOKENS=4096
+CLUSTER_DELIBERATE_PROMPT_RESERVE=384
 ```
 
 To inspect the actively resolved configuration:
@@ -261,6 +267,35 @@ sekha-cluster-tool orchestrate \
   -a "#project:kestrel" \
   --sync
 ```
+
+#### Relevance gating (Stage 2 → Stage 3)
+Recalled nodes pass to Node 2 only if all of these hold:
+- `sim_score` ≥ `--min-sim` (default `0.50`, env `CLUSTER_RECALL_MIN_SIM`). The blended `score` is not used, because recency and anchor boosts lift the episode the previous cycle just consolidated. Nodes with no `sim_score` (anchor-only hits in Node 1's lean schema) are admitted only if they match a requested anchor and pass the term check below.
+- When `-a` anchors are given and the node lists anchors, at least one of them matches.
+- The node's distinctive terms overlap the current input. At least 2 terms and 15% of the node's terms must appear in the input, and the directive's own words don't count toward this.
+
+The recall query is the directive plus an excerpt of up to 512 runes from the most salient chunk. `stages[1].relevance_gate` lists every kept and dropped node with its `sim_score`, term overlap and drop reason (`missing_sim_score`, `below_sim_floor`, `anchor_mismatch`, `insufficient_term_overlap`). `recall.nodes` in the output contains only the kept nodes.
+
+#### Node 2 context budget (Stage 3)
+The prompt budget is `--context-tokens` (default `4096`, env `CLUSTER_DELIBERATE_CONTEXT_TOKENS`) minus `--max-tokens`, minus `--prompt-reserve` (default `384`, env `CLUSTER_DELIBERATE_PROMPT_RESERVE`) for the Node 2 template. Tokens are estimated conservatively, erring high: every digit, symbol and non-ASCII byte pair counts as one token. Recalled facts get at most a quarter of the budget, ranked by `sim_score`. Chunks fill the rest in salience order. The first chunk that doesn't fit is truncated and lower ranked chunks are dropped. Kept chunks go to Node 2 in their original order.
+
+`stages[2].context_budget` reports the budget, the estimated prompt tokens, Node 2's reported `prompt_tokens`, `within_budget`, and each truncation or drop with its token counts. If the objective alone can't fit, nothing is sent to Node 2 and the stage fails with an explicit error. Stage 4 still consolidates the full, untruncated sensory stream.
+
+---
+
+## 📦 Large Payloads
+
+`--input` / `--text` (on `filter`, `orchestrate` and `consolidate`) and `consolidate --trace` are **repeatable**. On `consolidate`, `--input` is stored as a `sensory_context` item alongside `--goal` / `--session-id`. Occurrences are joined in order with no separator, so a payload can be split at any byte offset:
+
+```bash
+sekha-cluster-tool orchestrate --task "Answer from the transcript" \
+  --input "$PART1" --input "$PART2" --input "$PART3"
+```
+
+- **OS limits:** Linux caps a single argument at 128 KiB (`MAX_ARG_STRLEN`) and rejects larger ones before the CLI starts, so split anything larger into ≤120 KiB parts. macOS allows a single argument of 256 KB+ but caps all arguments plus the environment at about 1 MiB (`ARG_MAX`).
+- **Input cap:** the combined input from inline flags, `--file` or stdin (`--file -`) is capped at 1 MiB. Raise it with `--max-input-bytes` or `CLUSTER_MAX_INPUT_BYTES`. Input over the cap fails with an actionable error before anything is sent. It is **never truncated**.
+- **`--file`** is an optional convenience for human operators. It can't be combined with inline input.
+- **Timeouts:** requests over 64 KiB get a deadline of at least 5s + 2s per 64 KiB (for example 21s for 500 KB). The Node 2 deadline scales with the packed prompt size and `--max-tokens`.
 
 ---
 

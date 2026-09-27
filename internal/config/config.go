@@ -19,6 +19,9 @@ var (
 	BuildKnowledgeURL = ""
 )
 
+// DefaultMaxInputBytes caps the combined inline/file/stdin payload a single invocation accepts (1 MiB).
+const DefaultMaxInputBytes = 1 << 20
+
 // Config represents the fully resolved runtime configuration for the cluster tool.
 type Config struct {
 	SensoryURL        string        `json:"sensory_url"`
@@ -31,6 +34,10 @@ type Config struct {
 	DeliberateTimeout time.Duration `json:"deliberate_timeout"`
 	SalienceThreshold float64       `json:"salience_threshold"`
 	RecallTopK        int           `json:"recall_top_k"`
+	RecallMinSim      float64       `json:"recall_min_sim,omitempty"`
+	MaxInputBytes     int           `json:"max_input_bytes"`
+	ContextTokens     int           `json:"deliberate_context_tokens,omitempty"`
+	PromptReserve     int           `json:"deliberate_prompt_reserve_tokens,omitempty"`
 	EnvFileLoaded     string        `json:"env_file_loaded,omitempty"`
 }
 
@@ -48,6 +55,10 @@ type FlagOverrides struct {
 	DeliberateTimeout time.Duration
 	SalienceThreshold float64
 	RecallTopK        int
+	RecallMinSim      float64
+	MaxInputBytes     int
+	ContextTokens     int
+	PromptReserve     int
 }
 
 // Load resolves configuration across flags, real OS environment variables, .env files, and build variables.
@@ -60,6 +71,7 @@ func Load(flags FlagOverrides) (*Config, error) {
 		DeliberateTimeout: 8000 * time.Millisecond,
 		SalienceThreshold: 0.45,
 		RecallTopK:        5,
+		MaxInputBytes:     DefaultMaxInputBytes,
 	}
 
 	// 1. Check build-time injected variables (from compile flags)
@@ -143,6 +155,27 @@ func Load(flags FlagOverrides) (*Config, error) {
 		}
 	}
 
+	if val := getEnv("CLUSTER_RECALL_MIN_SIM", ""); val != "" {
+		if f, err := strconv.ParseFloat(val, 64); err == nil && f > 0 {
+			cfg.RecallMinSim = f
+		}
+	}
+	if val := getEnv("CLUSTER_MAX_INPUT_BYTES", ""); val != "" {
+		if n, err := strconv.Atoi(val); err == nil && n > 0 {
+			cfg.MaxInputBytes = n
+		}
+	}
+	if val := getEnv("CLUSTER_DELIBERATE_CONTEXT_TOKENS", ""); val != "" {
+		if n, err := strconv.Atoi(val); err == nil && n > 0 {
+			cfg.ContextTokens = n
+		}
+	}
+	if val := getEnv("CLUSTER_DELIBERATE_PROMPT_RESERVE", ""); val != "" {
+		if n, err := strconv.Atoi(val); err == nil && n > 0 {
+			cfg.PromptReserve = n
+		}
+	}
+
 	if val := getEnv("CLUSTER_TLS_CA_CERT", ""); val != "" {
 		cfg.TLSCACert = val
 	}
@@ -185,6 +218,18 @@ func Load(flags FlagOverrides) (*Config, error) {
 	}
 	if flags.RecallTopK > 0 {
 		cfg.RecallTopK = flags.RecallTopK
+	}
+	if flags.RecallMinSim > 0 {
+		cfg.RecallMinSim = flags.RecallMinSim
+	}
+	if flags.MaxInputBytes > 0 {
+		cfg.MaxInputBytes = flags.MaxInputBytes
+	}
+	if flags.ContextTokens > 0 {
+		cfg.ContextTokens = flags.ContextTokens
+	}
+	if flags.PromptReserve > 0 {
+		cfg.PromptReserve = flags.PromptReserve
 	}
 
 	return cfg, nil
@@ -338,6 +383,13 @@ CLUSTER_DELIBERATE_TIMEOUT_MS=8000
 # Attention & Recall Parameters
 CLUSTER_SALIENCE_THRESHOLD=0.45
 CLUSTER_RECALL_TOP_K=5
+# Relevance gate: minimum sim_score for recalled nodes to reach Node 2 (default 0.50)
+# CLUSTER_RECALL_MIN_SIM=0.50
+
+# Payload & Node 2 context budget
+# CLUSTER_MAX_INPUT_BYTES=1048576
+# CLUSTER_DELIBERATE_CONTEXT_TOKENS=4096
+# CLUSTER_DELIBERATE_PROMPT_RESERVE=384
 
 # Transport Encryption & TLS (optional)
 # CLUSTER_TLS_CA_CERT=/path/to/ca.crt

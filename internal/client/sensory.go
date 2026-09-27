@@ -88,11 +88,11 @@ func (c *SensoryClient) Filter(ctx context.Context, req model.FilterRequest, tra
 	}
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		return nil, FormatUnauthorizedError(urlStr, string(respBytes))
+		return nil, FormatUnauthorizedError(urlStr, bodySnippet(respBytes))
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("node 3 filter failed: server returned error HTTP %d: %s", resp.StatusCode, string(respBytes))
+		return nil, fmt.Errorf("node 3 filter failed: server returned error HTTP %d: %s", resp.StatusCode, bodySnippet(respBytes))
 	}
 
 	type node3ChunkItem struct {
@@ -144,7 +144,7 @@ func (c *SensoryClient) Filter(ctx context.Context, req model.FilterRequest, tra
 
 	var inter intermediateFilterResponse
 	if err := json.Unmarshal(respBytes, &inter); err != nil {
-		return nil, fmt.Errorf("failed to decode JSON response from %s: %w (body: %s)", urlStr, err, string(respBytes))
+		return nil, fmt.Errorf("failed to decode JSON response from %s: %w (body: %s)", urlStr, err, bodySnippet(respBytes))
 	}
 
 	finalResp := &model.FilterResponse{
@@ -304,11 +304,11 @@ func (c *SensoryClient) GetStats(ctx context.Context, traceID string) (*model.Se
 	}
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		return nil, FormatUnauthorizedError(urlStr, string(respBytes))
+		return nil, FormatUnauthorizedError(urlStr, bodySnippet(respBytes))
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("server returned error HTTP %d from %s: %s", resp.StatusCode, urlStr, string(respBytes))
+		return nil, fmt.Errorf("server returned error HTTP %d from %s: %s", resp.StatusCode, urlStr, bodySnippet(respBytes))
 	}
 
 	type rawSensoryStats struct {
@@ -338,7 +338,7 @@ func (c *SensoryClient) GetStats(ctx context.Context, traceID string) (*model.Se
 	decoder := json.NewDecoder(bytes.NewReader(respBytes))
 	decoder.UseNumber()
 	if err := decoder.Decode(&raw); err != nil {
-		return nil, fmt.Errorf("failed to decode JSON response from %s: %w (body: %s)", urlStr, err, string(respBytes))
+		return nil, fmt.Errorf("failed to decode JSON response from %s: %w (body: %s)", urlStr, err, bodySnippet(respBytes))
 	}
 
 	defaultNode := "sekha-node3"
@@ -437,4 +437,3 @@ func (c *SensoryClient) GetStats(ctx context.Context, traceID string) (*model.Se
 
 	return statsResp, nil
 }
-

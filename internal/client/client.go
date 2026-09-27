@@ -17,6 +17,38 @@ import (
 	"github.com/Duara-Cortex/sekha-cluster-tool/internal/telemetry"
 )
 
+const (
+	// largePayloadBytes is the request size above which PayloadTimeout widens the deadline.
+	largePayloadBytes = 64 << 10
+	// maxErrorBodyBytes bounds how much of a response body is echoed into error messages.
+	maxErrorBodyBytes = 2048
+)
+
+// PayloadTimeout returns the deadline for a request carrying payloadBytes of body. Payloads up to
+// 64 KiB keep base; larger ones get 5s plus 2s per started 64 KiB, and never less than base.
+// A 500 KB payload therefore gets at least 21s.
+func PayloadTimeout(base time.Duration, payloadBytes int) time.Duration {
+	if payloadBytes <= largePayloadBytes {
+		return base
+	}
+	blocks := (payloadBytes + largePayloadBytes - 1) / largePayloadBytes
+	return max(base, 5*time.Second+time.Duration(blocks)*2*time.Second)
+}
+
+// DeliberationTimeout returns the Node 2 deadline for a prompt of promptTokens generating up to
+// maxTokens, assuming edge-hardware rates of at least 40 tok/s prompt eval and 10 tok/s generation.
+func DeliberationTimeout(base time.Duration, promptTokens, maxTokens int) time.Duration {
+	return max(base, 5*time.Second+time.Duration(promptTokens)*25*time.Millisecond+time.Duration(maxTokens)*100*time.Millisecond)
+}
+
+// bodySnippet renders a response body for error messages, capped so large echoes stay readable.
+func bodySnippet(b []byte) string {
+	if len(b) <= maxErrorBodyBytes {
+		return string(b)
+	}
+	return fmt.Sprintf("%s... (%d bytes total)", b[:maxErrorBodyBytes], len(b))
+}
+
 // Config is an alias to config.Config.
 type Config = config.Config
 
@@ -186,16 +218,16 @@ func (c *BaseClient) PostJSON(ctx context.Context, url string, payload interface
 	}
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		return FormatUnauthorizedError(url, string(respBytes))
+		return FormatUnauthorizedError(url, bodySnippet(respBytes))
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("server returned error HTTP %d from %s: %s", resp.StatusCode, url, string(respBytes))
+		return fmt.Errorf("server returned error HTTP %d from %s: %s", resp.StatusCode, url, bodySnippet(respBytes))
 	}
 
 	if target != nil && len(respBytes) > 0 {
 		if err := json.Unmarshal(respBytes, target); err != nil {
-			return fmt.Errorf("failed to decode JSON response from %s: %w (body: %s)", url, err, string(respBytes))
+			return fmt.Errorf("failed to decode JSON response from %s: %w (body: %s)", url, err, bodySnippet(respBytes))
 		}
 	}
 
@@ -228,11 +260,11 @@ func (c *BaseClient) GetJSON(ctx context.Context, url string, target interface{}
 	}
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		return FormatUnauthorizedError(url, string(respBytes))
+		return FormatUnauthorizedError(url, bodySnippet(respBytes))
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("server returned error HTTP %d from %s: %s", resp.StatusCode, url, string(respBytes))
+		return fmt.Errorf("server returned error HTTP %d from %s: %s", resp.StatusCode, url, bodySnippet(respBytes))
 	}
 
 	if target != nil && len(respBytes) > 0 {

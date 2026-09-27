@@ -19,12 +19,14 @@ type Orchestrator struct {
 }
 
 // NewOrchestrator initialises the orchestration engine with cluster layer clients.
+// The clients carry no fixed HTTP timeout: RunCycle sets a per-stage deadline sized to the
+// payload each stage actually sends.
 func NewOrchestrator(cfg client.Config) *Orchestrator {
 	return &Orchestrator{
 		cfg:       cfg,
-		sensory:   client.NewSensoryClient(cfg.SensoryURL, cfg.DefaultTimeout, cfg.TLSCACert, cfg.Insecure),
-		working:   client.NewWorkingClient(cfg.WorkingURL, cfg.DeliberateTimeout, cfg.TLSCACert, cfg.Insecure),
-		knowledge: client.NewKnowledgeClient(cfg.KnowledgeURL, cfg.DefaultTimeout, cfg.APIKey, cfg.TLSCACert, cfg.Insecure),
+		sensory:   client.NewSensoryClient(cfg.SensoryURL, 0, cfg.TLSCACert, cfg.Insecure),
+		working:   client.NewWorkingClient(cfg.WorkingURL, 0, cfg.TLSCACert, cfg.Insecure),
+		knowledge: client.NewKnowledgeClient(cfg.KnowledgeURL, 0, cfg.APIKey, cfg.TLSCACert, cfg.Insecure),
 	}
 }
 
@@ -64,7 +66,10 @@ func (o *Orchestrator) RunCycle(ctx context.Context, req model.OrchestrateReques
 		Threshold:     threshold,
 	}
 
-	sensoryResp, err := o.sensory.Filter(ctx, filterReq, traceID)
+	payloadTimeout := client.PayloadTimeout(o.cfg.DefaultTimeout, len(req.RawInput))
+	stage1Ctx, cancel1 := withDeadline(ctx, payloadTimeout)
+	sensoryResp, err := o.sensory.Filter(stage1Ctx, filterReq, traceID)
+	cancel1()
 	stage1Duration := float64(time.Since(stage1Start).Microseconds()) / 1000.0
 
 	sensoryNodeName := fmt.Sprintf("Sensory Layer (%s)", o.cfg.SensoryURL)
@@ -112,10 +117,7 @@ func (o *Orchestrator) RunCycle(ctx context.Context, req model.OrchestrateReques
 		topK = 5
 	}
 
-	recallQuery := req.TaskDirective
-	if recallQuery == "" && len(sensoryResp.Chunks) > 0 {
-		recallQuery = sensoryResp.Chunks[0].Text
-	}
+	recallQuery, excerptTruncated := buildRecallQuery(req.TaskDirective, sensoryResp.Chunks)
 
 	recallReq := model.RecallRequest{
 		Query:             recallQuery,
@@ -129,11 +131,13 @@ func (o *Orchestrator) RunCycle(ctx context.Context, req model.OrchestrateReques
 		IncludeEmbeddings: req.IncludeEmbeddings,
 	}
 
-	recallResp, err := o.knowledge.Recall(ctx, recallReq, traceID)
+	stage2Ctx, cancel2 := withDeadline(ctx, o.cfg.DefaultTimeout)
+	recallResp, err := o.knowledge.Recall(stage2Ctx, recallReq, traceID)
+	cancel2()
 	stage2Duration := float64(time.Since(stage2Start).Microseconds()) / 1000.0
 
 	knowledgeNodeName := fmt.Sprintf("Knowledge Layer (%s)", o.cfg.KnowledgeURL)
-	longTermFacts := make([]string, 0)
+	var facts []rankedFact
 	if err != nil {
 		resp.Stages = append(resp.Stages, model.StageTelemetry{
 			StageName:  "2_long_term_recall",
@@ -146,16 +150,33 @@ func (o *Orchestrator) RunCycle(ctx context.Context, req model.OrchestrateReques
 		telemetry.LogStep(traceID, "LongTermRecall", fmt.Sprintf("Recall stage error: %v", err))
 		recallResp = &model.RecallResponse{}
 	} else {
-		resp.Stages = append(resp.Stages, model.StageTelemetry{
-			StageName:  "2_long_term_recall",
-			Node:       knowledgeNodeName,
-			Endpoint:   "/api/v1/memory/recall",
-			DurationMS: stage2Duration,
-			Status:     "success",
+		reference, referenceSource := relevanceReference(req.TaskDirective, sensoryResp.Chunks)
+		kept, gate := gateRecall(recallResp.Nodes, reference, referenceSource, gateSettings{
+			minSim:          positiveOr(req.RecallMinSim, DefaultRecallMinSim),
+			minTermOverlap:  DefaultMinTermOverlap,
+			minTermCoverage: DefaultMinTermCoverage,
+			anchors:         req.Anchors,
 		})
-		for _, node := range recallResp.Nodes {
-			fact := fmt.Sprintf("[%s: %s] %s", node.EntityType, node.Label, node.Summary)
-			longTermFacts = append(longTermFacts, fact)
+		gate.RecallQueryBytes = len(recallQuery)
+		gate.RecallQueryExcerpt = excerptTruncated
+		filterRecallResponse(recallResp, kept)
+		telemetry.LogStep(traceID, "RelevanceGate", fmt.Sprintf("Kept %d of %d recalled nodes (sim floor %.2f)", gate.NodesKept, gate.NodesIn, gate.MinSimScore))
+
+		resp.Stages = append(resp.Stages, model.StageTelemetry{
+			StageName:     "2_long_term_recall",
+			Node:          knowledgeNodeName,
+			Endpoint:      "/api/v1/memory/recall",
+			DurationMS:    stage2Duration,
+			Status:        "success",
+			RelevanceGate: gate,
+		})
+		for i, node := range kept {
+			facts = append(facts, rankedFact{
+				order: i,
+				id:    node.ID,
+				text:  fmt.Sprintf("[%s: %s] %s", node.EntityType, node.Label, node.Summary),
+				score: node.SimScore,
+			})
 		}
 	}
 	resp.Recall = *recallResp
@@ -169,46 +190,77 @@ func (o *Orchestrator) RunCycle(ctx context.Context, req model.OrchestrateReques
 		maxTokens = 256
 	}
 
-	delibReq := model.DeliberateRequest{
-		Objective:       req.TaskDirective,
-		SensoryChunks:   sensoryResp.Chunks,
-		LongTermContext: longTermFacts,
-		MaxTokens:       maxTokens,
-		Temperature:     0.2,
+	objective := req.TaskDirective
+	if objective == "" {
+		objective = "Process salient sensory inputs and formulate next action"
 	}
-	if delibReq.Objective == "" {
-		delibReq.Objective = "Process salient sensory inputs and formulate next action"
-	}
-
-	delibResp, err := o.working.Deliberate(ctx, delibReq, traceID)
-	stage3Duration := float64(time.Since(stage3Start).Microseconds()) / 1000.0
 
 	workingNodeName := fmt.Sprintf("Working Memory Layer (%s)", o.cfg.WorkingURL)
+	packed, packErr := packContext(objective, sensoryResp.Chunks, facts, budgetSettings{
+		contextTokens: positiveIntOr(req.ContextTokens, DefaultContextTokens),
+		maxTokens:     maxTokens,
+		reserveTokens: positiveIntOr(req.PromptReserveTokens, DefaultPromptReserveTokens),
+	})
+
+	var delibResp *model.DeliberateResponse
+	if packErr != nil {
+		err = packErr
+	} else {
+		delibReq := model.DeliberateRequest{
+			Objective:       objective,
+			SensoryChunks:   packed.chunks,
+			LongTermContext: packed.facts,
+			MaxTokens:       maxTokens,
+			Temperature:     0.2,
+		}
+		stage3Ctx, cancel3 := withDeadline(ctx, client.DeliberationTimeout(o.cfg.DeliberateTimeout, packed.report.EstimatedPromptTokens, maxTokens))
+		delibResp, err = o.working.Deliberate(stage3Ctx, delibReq, traceID)
+		cancel3()
+		if err == nil && delibResp.PromptTokens > 0 {
+			packed.report.ActualPromptTokens = delibResp.PromptTokens
+			packed.report.WithinBudget = delibResp.PromptTokens <= packed.report.PromptLimitTokens
+		}
+	}
+	stage3Duration := float64(time.Since(stage3Start).Microseconds()) / 1000.0
+
 	if err != nil {
 		resp.Stages = append(resp.Stages, model.StageTelemetry{
-			StageName:  "3_working_deliberate",
-			Node:       workingNodeName,
-			Endpoint:   "/api/v1/working/deliberate",
-			DurationMS: stage3Duration,
-			Status:     "failed",
-			Error:      err.Error(),
+			StageName:     "3_working_deliberate",
+			Node:          workingNodeName,
+			Endpoint:      "/api/v1/working/deliberate",
+			DurationMS:    stage3Duration,
+			Status:        "failed",
+			Error:         err.Error(),
+			ContextBudget: packed.report,
 		})
 		telemetry.LogStep(traceID, "WorkingMemory", fmt.Sprintf("Deliberation stage error: %v", err))
+		fallbackThought := "Deliberation service unreachable; fallback to direct response."
+		if packErr != nil {
+			fallbackThought = "Deliberation skipped: prompt would exceed the Node 2 context budget."
+		}
 		delibResp = &model.DeliberateResponse{
 			Status:           "failed",
 			StepIndex:        1,
 			TrajectoryLength: 1,
-			Thought:          "Deliberation service unreachable; fallback to direct response.",
+			Thought:          fallbackThought,
 			ProposedAction:   "AWAIT_STABILISATION",
 			IsComplete:       false,
 		}
 	} else {
+		telemetry.LogStep(traceID, "ContextBudget", fmt.Sprintf("Packed %d/%d chunks and %d/%d facts, ~%d of %d prompt tokens (actual %d)",
+			packed.report.ChunksPacked, packed.report.ChunksIn, packed.report.FactsPacked, packed.report.FactsIn,
+			packed.report.EstimatedPromptTokens, packed.report.PromptBudgetTokens, packed.report.ActualPromptTokens))
+		status := "success"
+		if !packed.report.WithinBudget {
+			status = "over_budget"
+		}
 		resp.Stages = append(resp.Stages, model.StageTelemetry{
-			StageName:  "3_working_deliberate",
-			Node:       workingNodeName,
-			Endpoint:   "/api/v1/working/deliberate",
-			DurationMS: stage3Duration,
-			Status:     "success",
+			StageName:     "3_working_deliberate",
+			Node:          workingNodeName,
+			Endpoint:      "/api/v1/working/deliberate",
+			DurationMS:    stage3Duration,
+			Status:        status,
+			ContextBudget: packed.report,
 		})
 	}
 	resp.Deliberation = *delibResp
@@ -260,7 +312,9 @@ func (o *Orchestrator) RunCycle(ctx context.Context, req model.OrchestrateReques
 		Synchronous:      req.SynchronousConsolidate,
 	}
 
-	consolidateResp, err := o.knowledge.Consolidate(ctx, consolidateReq, traceID)
+	stage4Ctx, cancel4 := withDeadline(ctx, payloadTimeout)
+	consolidateResp, err := o.knowledge.Consolidate(stage4Ctx, consolidateReq, traceID)
+	cancel4()
 	stage4Duration := float64(time.Since(stage4Start).Microseconds()) / 1000.0
 
 	if err != nil {
@@ -296,4 +350,26 @@ func (o *Orchestrator) RunCycle(ctx context.Context, req model.OrchestrateReques
 	telemetry.LogStep(traceID, "Orchestrator", fmt.Sprintf("Cognitive cycle completed in %.2fms", resp.TotalDurationMS))
 
 	return resp, nil
+}
+
+// withDeadline applies d to ctx; a non-positive d means no deadline, as with the HTTP client.
+func withDeadline(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	if d <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, d)
+}
+
+func positiveOr(v, fallback float64) float64 {
+	if v > 0 {
+		return v
+	}
+	return fallback
+}
+
+func positiveIntOr(v, fallback int) int {
+	if v > 0 {
+		return v
+	}
+	return fallback
 }
